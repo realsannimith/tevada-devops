@@ -24,6 +24,7 @@ import {
 } from '../agent/agent';
 import { AgentToolContext } from '../agent/tools';
 import { getPlaybook, playbookMeta } from '../agent/playbooks';
+import { consumePendingKey, generateKeyPair } from './keygen';
 
 let runCounter = 0;
 let sessionCounter = 0;
@@ -55,6 +56,15 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
     status: cm.getStatus(p.id),
   });
 
+  /** Swap an in-app keyRef for the stashed private key (kept out of the renderer). */
+  const resolveSecret = (secret: ServerSecret): ServerSecret => {
+    if (!secret.keyRef) return secret;
+    const privateKey = consumePendingKey(secret.keyRef);
+    const rest = { ...secret };
+    delete rest.keyRef;
+    return { ...rest, privateKey: privateKey ?? secret.privateKey };
+  };
+
   /** Load the stored secret and connect. Shared by ssh:connect and the agent. */
   const connectServer = async (serverId: string) => {
     const profile = store.getServer(serverId);
@@ -77,7 +87,7 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
         id,
         createdAt: Date.now(),
       };
-      secrets.saveSecret(id, arg.secret);
+      secrets.saveSecret(id, resolveSecret(arg.secret));
       store.addServer(profile);
       return withStatus(profile);
     },
@@ -94,7 +104,7 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
       },
     ) => {
       const updated = store.updateServer(arg.id, arg.profile);
-      if (arg.secret) secrets.saveSecret(arg.id, arg.secret);
+      if (arg.secret) secrets.saveSecret(arg.id, resolveSecret(arg.secret));
       return updated ? withStatus(updated) : null;
     },
   );
@@ -120,6 +130,12 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
       };
       return cm.testConnection(profile, arg.secret);
     },
+  );
+
+  // --- keys ----------------------------------------------------------------
+
+  ipcMain.handle(IPC.keysGenerate, (_e, arg: { comment?: string }) =>
+    generateKeyPair(arg?.comment ?? 'easy-host'),
   );
 
   // --- ssh -----------------------------------------------------------------

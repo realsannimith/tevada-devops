@@ -10,6 +10,7 @@ import {
   AgentEventEnvelope,
   AgentStartRequest,
   AppSettings,
+  GeneratedKey,
   IPC,
   MonitorStatsEvent,
   PlaybookMeta,
@@ -50,6 +51,11 @@ const easyhost = {
       secret: ServerSecret,
     ): Promise<{ ok: boolean; error?: string }> =>
       ipcRenderer.invoke(IPC.serversTest, { profile, secret }),
+  },
+
+  keys: {
+    generate: (comment?: string): Promise<GeneratedKey> =>
+      ipcRenderer.invoke(IPC.keysGenerate, { comment }),
   },
 
   ssh: {

@@ -27,7 +27,16 @@ export type ServerSecret = {
   password?: string;
   privateKey?: string;
   passphrase?: string;
+  /**
+   * Reference to a key generated in-app (see keygen.ts). When present, main
+   * swaps it for the stashed private key at save time, so the private key never
+   * has to travel to the renderer.
+   */
+  keyRef?: string;
 };
+
+/** Public half of an in-app generated key, plus the ref used to save it. */
+export type GeneratedKey = { keyRef: string; publicKey: string };
 
 export type ConnStatus =
   | 'disconnected'
@@ -151,6 +160,8 @@ export const IPC = {
   serversUpdate: 'servers:update',
   serversRemove: 'servers:remove',
   serversTest: 'servers:test',
+  // keys (invoke)
+  keysGenerate: 'keys:generate',
   // ssh (invoke)
   sshConnect: 'ssh:connect',
   sshDisconnect: 'ssh:disconnect',
