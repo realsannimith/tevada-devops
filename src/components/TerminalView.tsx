@@ -7,6 +7,7 @@
 import { useEffect, useRef } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
+import { WebglAddon } from '@xterm/addon-webgl';
 import '@xterm/xterm/css/xterm.css';
 import { useServers } from '@/hooks/useServers';
 
@@ -45,6 +46,16 @@ function getOrCreate(serverId: string): Cached {
   const fit = new FitAddon();
   term.loadAddon(fit);
   term.open(el);
+
+  // GPU-accelerated rendering — the single biggest responsiveness win. Falls
+  // back to the default renderer automatically if the WebGL context is lost.
+  try {
+    const webgl = new WebglAddon();
+    webgl.onContextLoss(() => webgl.dispose());
+    term.loadAddon(webgl);
+  } catch {
+    /* WebGL unavailable — the default renderer still works. */
+  }
 
   const entry: Cached = { term, fit, el, sessionId: null, disposers: [] };
   cache.set(serverId, entry);

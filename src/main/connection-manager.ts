@@ -272,17 +272,36 @@ export class ConnectionManager {
         (err, channel) => {
           if (err) return reject(err);
           m.shells.set(sessionId, channel);
+
+          // Coalesce output: buffer chunks that arrive within the same I/O tick
+          // and flush them as a single IPC message. This batches bursty output
+          // (e.g. `ls -R`, `cat bigfile`) without adding latency to interactive
+          // echo, which flushes on the next tick anyway.
+          let buffer: Buffer[] = [];
+          let scheduled = false;
+          const flush = () => {
+            scheduled = false;
+            if (buffer.length === 0) return;
+            const data = Buffer.concat(buffer).toString('utf8');
+            buffer = [];
+            this.listeners.onShellData(sessionId, data);
+          };
+          const push = (chunk: Buffer) => {
+            buffer.push(chunk);
+            if (!scheduled) {
+              scheduled = true;
+              setImmediate(flush);
+            }
+          };
+
           channel
-            .on('data', (chunk: Buffer) => {
-              this.listeners.onShellData(sessionId, chunk.toString('utf8'));
-            })
+            .on('data', push)
             .on('close', () => {
+              flush();
               m.shells.delete(sessionId);
               this.listeners.onShellExit(sessionId);
             });
-          channel.stderr.on('data', (chunk: Buffer) => {
-            this.listeners.onShellData(sessionId, chunk.toString('utf8'));
-          });
+          channel.stderr.on('data', push);
           resolve();
         },
       );
