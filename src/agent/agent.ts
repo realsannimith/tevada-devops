@@ -1,26 +1,21 @@
 /**
- * Vercel AI SDK agent — runs in Electron's MAIN process (Node.js).
+ * DevOps agent — runs in Electron's MAIN process (Node.js). The Gemini API key and
+ * the AI SDK never reach the renderer; the renderer drives runs over IPC and
+ * receives streamed AgentEvents.
  *
- * Keeping the agent here (rather than in the renderer) means the API key never
- * reaches the web/renderer context, and the agent's tools can use real Node.js
- * APIs. The renderer talks to this module over IPC (see main.ts / preload.ts).
- *
- * Provider: Google Gemini via @ai-sdk/google. The API key is read from the
- * environment (loaded from .env in main.ts via `dotenv`).
+ * A run is fire-and-forget: startAgentRun kicks off streaming and returns; progress
+ * (text deltas, tool activity, approvals) is pushed to the renderer via the `emit`
+ * callback. Runs are cancellable via an AbortController registry.
  */
-import os from 'node:os';
-import { ToolLoopAgent, tool, stepCountIs } from 'ai';
+import { ToolLoopAgent, stepCountIs } from 'ai';
 import { createGoogleGenerativeAI } from '@ai-sdk/google';
-import { z } from 'zod';
+import { AgentEvent } from '../shared/ipc-types';
+import { AgentToolContext, buildTools } from './tools';
 
-/** A chat message as sent from the renderer. */
 export type ChatMessage = { role: 'user' | 'assistant'; content: string };
 
-// Model is configurable via env; defaults to a current, agentic Gemini model.
 const MODEL_ID = process.env.AGENT_MODEL ?? 'gemini-3.1-pro';
 
-// Accept any of the common Google key names for convenience; the AI SDK's
-// Google provider natively expects GOOGLE_GENERATIVE_AI_API_KEY.
 function resolveApiKey(): string | undefined {
   return (
     process.env.GOOGLE_GENERATIVE_AI_API_KEY ??
@@ -29,64 +24,127 @@ function resolveApiKey(): string | undefined {
   );
 }
 
-// Build the agent lazily so a missing API key doesn't crash app startup, and so
-// the key is read *after* dotenv has populated the environment. The error is
-// raised only when the user actually sends a message.
-let agent: ToolLoopAgent | null = null;
+const SYSTEM_PROMPT = [
+  'You are EASY-HOST, an expert DevOps operator embedded in a desktop app. You manage the user\'s Linux servers over SSH by calling tools.',
+  '',
+  'Operating rules:',
+  '- If you are unsure which server to act on, call listServers first. Use connectServer before running commands if a server is not connected.',
+  '- Run one command at a time with runCommand and CHECK its exitCode before moving on. If a command fails, diagnose and adapt.',
+  '- Always use non-interactive flags: `DEBIAN_FRONTEND=noninteractive apt-get -y ...`, `--non-interactive`, `-y`, `--assume-yes`. Never launch interactive TUIs (vim, nano, htop, top, less, more) — they will hang. Edit files with writeRemoteFile or non-interactive sed.',
+  '- Prefer idempotent steps so re-running is safe. Detect the distro (cat /etc/os-release) before installing packages.',
+  '- Use sudo when a command needs root. For writing root-owned files, use writeRemoteFile with sudo=true.',
+  '- Keep the user informed: give each runCommand a clear `description`. When the task is complete, end with a concise summary of what you did and any follow-ups (e.g. DNS records the user must set).',
+].join('\n');
 
-function getAgent(): ToolLoopAgent {
-  if (agent) return agent;
+type RunHandle = { abort: AbortController };
+const runs = new Map<string, RunHandle>();
 
-  const google = createGoogleGenerativeAI({ apiKey: resolveApiKey() });
-
-  agent = new ToolLoopAgent({
-    model: google(MODEL_ID),
-    system:
-      'You are a helpful assistant embedded in the EASY-HOST desktop app. ' +
-      'Be concise. Use the provided tools when they can answer the question.',
-    // These tools execute in the main process, so they have real Node access.
-    tools: {
-      getCurrentTime: tool({
-        description: "Get the user's current local date and time.",
-        inputSchema: z.object({}),
-        execute: async () => ({ now: new Date().toString() }),
-      }),
-      getSystemInfo: tool({
-        description:
-          'Get information about the machine running this desktop app.',
-        inputSchema: z.object({}),
-        execute: async () => ({
-          platform: os.platform(),
-          arch: os.arch(),
-          release: os.release(),
-          hostname: os.hostname(),
-          cpus: os.cpus().length,
-          totalMemGB: +(os.totalmem() / 1024 ** 3).toFixed(1),
-        }),
-      }),
-    },
-    // Stop the agentic loop once it produces a final text answer (or after 10 steps).
-    stopWhen: stepCountIs(10),
-  });
-
-  return agent;
-}
-
-/**
- * Run the agent over a chat history and return its final text answer.
- * Throws on failure (e.g. missing API key) — callers surface the message.
- */
-export async function runAgent(
-  messages: ChatMessage[],
-): Promise<{ text: string; model: string }> {
-  if (!resolveApiKey()) {
-    throw new Error(
-      'No Google API key found. Add GOOGLE_GENERATIVE_AI_API_KEY to your .env file and restart the app.',
-    );
-  }
-
-  const result = await getAgent().generate({ messages });
-  return { text: result.text, model: MODEL_ID };
+export function hasApiKey(): boolean {
+  return !!resolveApiKey();
 }
 
 export const agentModel = MODEL_ID;
+
+export type StartAgentRunOptions = {
+  runId: string;
+  messages: ChatMessage[];
+  maxSteps: number;
+  toolContext: AgentToolContext;
+  emit: (event: AgentEvent) => void;
+};
+
+/**
+ * Start a streaming agent run. Returns immediately; progress arrives via emit.
+ */
+export function startAgentRun(opts: StartAgentRunOptions): void {
+  const { runId, messages, maxSteps, toolContext, emit } = opts;
+
+  if (!resolveApiKey()) {
+    emit({
+      type: 'error',
+      message:
+        'No Google API key found. Add GOOGLE_GENERATIVE_AI_API_KEY to your .env file and restart the app.',
+    });
+    emit({ type: 'done', finalText: '' });
+    return;
+  }
+
+  const abort = new AbortController();
+  runs.set(runId, { abort });
+
+  const google = createGoogleGenerativeAI({ apiKey: resolveApiKey() });
+  const agent = new ToolLoopAgent({
+    model: google(MODEL_ID),
+    instructions: SYSTEM_PROMPT,
+    tools: buildTools(toolContext),
+    stopWhen: stepCountIs(maxSteps),
+  });
+
+  void (async () => {
+    let finalText = '';
+    let stepIndex = 0;
+    try {
+      const result = await agent.stream({
+        messages,
+        abortSignal: abort.signal,
+      });
+
+      for await (const part of result.fullStream) {
+        switch (part.type) {
+          case 'text-delta':
+            finalText += part.text;
+            emit({ type: 'text-delta', text: part.text });
+            break;
+          case 'finish-step':
+            stepIndex += 1;
+            emit({ type: 'step', index: stepIndex });
+            break;
+          case 'error':
+            emit({
+              type: 'error',
+              message:
+                part.error instanceof Error
+                  ? part.error.message
+                  : String(part.error),
+            });
+            break;
+          default:
+            break;
+        }
+      }
+
+      if (stepIndex >= maxSteps) {
+        emit({
+          type: 'error',
+          message: `Reached the step limit (${maxSteps}). Ask me to continue if the task isn't finished, or raise the limit in Settings.`,
+        });
+      }
+      emit({ type: 'done', finalText });
+    } catch (err) {
+      if (abort.signal.aborted) {
+        emit({ type: 'cancelled' });
+      } else {
+        emit({
+          type: 'error',
+          message: err instanceof Error ? err.message : String(err),
+        });
+        emit({ type: 'done', finalText });
+      }
+    } finally {
+      runs.delete(runId);
+    }
+  })();
+}
+
+export function cancelAgentRun(runId: string): void {
+  const handle = runs.get(runId);
+  if (handle) {
+    handle.abort.abort();
+    runs.delete(runId);
+  }
+}
+
+export function cancelAllRuns(): void {
+  for (const [, h] of runs) h.abort.abort();
+  runs.clear();
+}

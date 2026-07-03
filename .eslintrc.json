@@ -12,5 +12,21 @@
     "plugin:import/electron",
     "plugin:import/typescript"
   ],
-  "parser": "@typescript-eslint/parser"
+  "parser": "@typescript-eslint/parser",
+  "settings": {
+    "import/resolver": {
+      "typescript": {
+        "project": "./tsconfig.json"
+      }
+    }
+  },
+  "ignorePatterns": [
+    "node_modules",
+    ".vite",
+    "out",
+    "dist",
+    "vite.config.ts",
+    "vite.*.config.*",
+    "forge.config.ts"
+  ]
 }
