@@ -14,7 +14,7 @@ import { AgentToolContext, buildTools } from './tools';
 
 export type ChatMessage = { role: 'user' | 'assistant'; content: string };
 
-const MODEL_ID = process.env.AGENT_MODEL ?? 'gemini-3.1-pro';
+const MODEL_ID = process.env.AGENT_MODEL ?? 'gemini-3.5-flash';
 
 function resolveApiKey(): string | undefined {
   return (

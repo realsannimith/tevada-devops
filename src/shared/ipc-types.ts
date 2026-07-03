@@ -51,12 +51,18 @@ export type AppSettings = {
   agentMaxSteps: number;
   /** Monitoring poll interval in ms. */
   pollIntervalMs: number;
+  /**
+   * Predictive local echo (typeahead): draw typed characters instantly as
+   * dimmed predictions before the server confirms them, the way Mosh/Termius do.
+   */
+  localEcho: boolean;
 };
 
 export const DEFAULT_SETTINGS: AppSettings = {
   approvalMode: false, // full-auto (YOLO) by default, per product decision
   agentMaxSteps: 50,
   pollIntervalMs: 4000,
+  localEcho: true,
 };
 
 // ---------------------------------------------------------------------------

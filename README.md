@@ -39,7 +39,7 @@ Google Gemini.
 1. Add a Google Gemini API key to `.env` (see `.env.example`):
    ```
    GOOGLE_GENERATIVE_AI_API_KEY=your_key_here
-   # AGENT_MODEL=gemini-3.1-pro   # optional override
+   # AGENT_MODEL=gemini-3.5-flash   # optional override
    ```
    Get a key at https://aistudio.google.com/apikey
 2. Install dependencies with [Bun](https://bun.sh): `bun install`

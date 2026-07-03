@@ -55,6 +55,20 @@ export function SettingsDialog({
               />
             </div>
 
+            <div className="flex items-center justify-between">
+              <div className="pr-4">
+                <Label>Predictive typing</Label>
+                <p className="text-xs text-muted-foreground">
+                  Show typed characters instantly (dimmed) before the server
+                  confirms them, so the terminal feels native over latency.
+                </p>
+              </div>
+              <Switch
+                checked={settings.localEcho}
+                onCheckedChange={(v) => patch({ localEcho: v })}
+              />
+            </div>
+
             <div className="grid gap-2">
               <Label htmlFor="steps">Max agent steps per run</Label>
               <Input

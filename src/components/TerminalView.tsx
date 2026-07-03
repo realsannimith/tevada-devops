@@ -10,11 +10,13 @@ import { FitAddon } from '@xterm/addon-fit';
 import { WebglAddon } from '@xterm/addon-webgl';
 import '@xterm/xterm/css/xterm.css';
 import { useServers } from '@/hooks/useServers';
+import { TypeaheadController } from './typeahead';
 
 type Cached = {
   term: Terminal;
   fit: FitAddon;
   el: HTMLDivElement;
+  typeahead: TypeaheadController;
   sessionId: string | null;
   disposers: (() => void)[];
 };
@@ -34,6 +36,7 @@ function getOrCreate(serverId: string): Cached {
   const el = document.createElement('div');
   el.style.height = '100%';
   el.style.width = '100%';
+  el.style.position = 'relative'; // anchor for the typeahead overlay
 
   const term = new Terminal({
     fontFamily:
@@ -57,7 +60,16 @@ function getOrCreate(serverId: string): Cached {
     /* WebGL unavailable — the default renderer still works. */
   }
 
-  const entry: Cached = { term, fit, el, sessionId: null, disposers: [] };
+  const typeahead = new TypeaheadController(term, el, THEME.background);
+
+  const entry: Cached = {
+    term,
+    fit,
+    el,
+    typeahead,
+    sessionId: null,
+    disposers: [],
+  };
   cache.set(serverId, entry);
   return entry;
 }
@@ -70,14 +82,20 @@ async function ensureSession(serverId: string, entry: Cached) {
   entry.sessionId = sessionId;
 
   const onData = entry.term.onData((data) => {
-    if (entry.sessionId)
-      window.easyhost.term.input(serverId, entry.sessionId, data);
+    entry.typeahead.handleInput(data, (d) => {
+      if (entry.sessionId)
+        window.easyhost.term.input(serverId, entry.sessionId, d);
+    });
   });
   const unsubData = window.easyhost.term.onData(({ sessionId: sid, data }) => {
-    if (sid === entry.sessionId) entry.term.write(data);
+    if (sid !== entry.sessionId) return;
+    // Write the real echo first, then reconcile predictions against the new
+    // cursor position.
+    entry.term.write(data, () => entry.typeahead.handleServerData(data));
   });
   const unsubExit = window.easyhost.term.onExit(({ sessionId: sid }) => {
     if (sid === entry.sessionId) {
+      entry.typeahead.clear();
       entry.term.writeln('\r\n\x1b[31m[session closed]\x1b[0m');
       entry.sessionId = null;
     }
@@ -101,6 +119,12 @@ export function TerminalView({ serverId }: { serverId: string }) {
 
     const entry = getOrCreate(serverId);
     host.appendChild(entry.el);
+
+    // Apply the predictive-echo preference (defaults on).
+    void window.easyhost.settings
+      .get()
+      .then((s) => (entry.typeahead.enabled = s.localEcho))
+      .catch(() => {});
 
     let ro: ResizeObserver | null = null;
     const raf = requestAnimationFrame(() => {
@@ -161,6 +185,7 @@ export function disposeTerminal(serverId: string) {
   const entry = cache.get(serverId);
   if (entry) {
     entry.disposers.forEach((d) => d());
+    entry.typeahead.dispose();
     entry.term.dispose();
     cache.delete(serverId);
   }
