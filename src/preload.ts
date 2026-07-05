@@ -9,18 +9,49 @@ import { contextBridge, ipcRenderer } from 'electron';
 import {
   AgentEventEnvelope,
   AgentStartRequest,
+  AlertEvent,
+  AlertsStatus,
   AppSettings,
+  ArtifactsScanResult,
+  ChatHistoryChangedEvent,
+  ChatHistoryState,
+  ChatSession,
+  ContainerCredentialGuess,
+  DatabaseCredential,
+  DatabaseCredentialMeta,
+  DeployLogResult,
+  DeploymentsResult,
+  EnvFileReadResult,
+  OkResult,
   GeneratedKey,
+  GithubAuthEvent,
+  GithubCloneResult,
+  GithubDeviceFlowStart,
+  GithubInstallationsResult,
+  GithubReposResult,
+  GithubStatus,
   IPC,
   MonitorStatsEvent,
   PlaybookMeta,
+  SaveDatabaseCredentialRequest,
+  ServerAlertConfig,
   ServerProfile,
   ServerSecret,
   ServerWithStatus,
   SshStatusEvent,
+  TelegramChatDetectResult,
+  TelegramConnectResult,
+  TelegramTestResult,
   TermDataEvent,
   TermExitEvent,
 } from './shared/ipc-types';
+
+type AlertConfigPatch = Partial<{
+  chatId: string | null;
+  failureThreshold: number;
+  successThreshold: number;
+  reminderMinutes: number;
+}>;
 
 type Unsubscribe = () => void;
 
@@ -112,6 +143,20 @@ const easyhost = {
       on<AgentEventEnvelope>(IPC.evtAgentEvent, cb),
   },
 
+  chatHistory: {
+    list: (): Promise<ChatHistoryState> => ipcRenderer.invoke(IPC.chatHistoryList),
+    upsert: (session: ChatSession): Promise<ChatHistoryState> =>
+      ipcRenderer.invoke(IPC.chatHistoryUpsert, session),
+    setActive: (id: string | null): Promise<ChatHistoryState> =>
+      ipcRenderer.invoke(IPC.chatHistorySetActive, id),
+    setPinned: (id: string, pinned: boolean): Promise<ChatHistoryState> =>
+      ipcRenderer.invoke(IPC.chatHistorySetPinned, id, pinned),
+    delete: (id: string): Promise<ChatHistoryState> =>
+      ipcRenderer.invoke(IPC.chatHistoryDelete, id),
+    onChanged: (cb: (state: ChatHistoryChangedEvent) => void) =>
+      on<ChatHistoryChangedEvent>(IPC.evtChatHistory, cb),
+  },
+
   settings: {
     get: (): Promise<AppSettings> => ipcRenderer.invoke(IPC.settingsGet),
     set: (patch: Partial<AppSettings>): Promise<AppSettings> =>
@@ -120,6 +165,99 @@ const easyhost = {
 
   playbooks: {
     list: (): Promise<PlaybookMeta[]> => ipcRenderer.invoke(IPC.playbooksList),
+  },
+
+  artifacts: {
+    scan: (serverId: string): Promise<ArtifactsScanResult> =>
+      ipcRenderer.invoke(IPC.artifactsScan, { serverId }),
+  },
+
+  deploys: {
+    list: (serverId: string): Promise<DeploymentsResult> =>
+      ipcRenderer.invoke(IPC.deploysList, { serverId }),
+    log: (serverId: string, logPath: string): Promise<DeployLogResult> =>
+      ipcRenderer.invoke(IPC.deploysLog, { serverId, logPath }),
+    envRead: (serverId: string, envPath: string): Promise<EnvFileReadResult> =>
+      ipcRenderer.invoke(IPC.deploysEnvRead, { serverId, envPath }),
+    envWrite: (
+      serverId: string,
+      envPath: string,
+      content: string,
+    ): Promise<OkResult> =>
+      ipcRenderer.invoke(IPC.deploysEnvWrite, { serverId, envPath, content }),
+    redeploy: (serverId: string, scriptPath: string): Promise<OkResult> =>
+      ipcRenderer.invoke(IPC.deploysRedeploy, { serverId, scriptPath }),
+  },
+
+  credentials: {
+    list: (serverId: string): Promise<DatabaseCredentialMeta[]> =>
+      ipcRenderer.invoke(IPC.credentialsList, { serverId }),
+    save: (
+      input: SaveDatabaseCredentialRequest,
+    ): Promise<DatabaseCredentialMeta> =>
+      ipcRenderer.invoke(IPC.credentialsSave, input),
+    reveal: (id: string): Promise<DatabaseCredential | null> =>
+      ipcRenderer.invoke(IPC.credentialsReveal, { id }),
+    delete: (id: string): Promise<{ ok: boolean }> =>
+      ipcRenderer.invoke(IPC.credentialsDelete, { id }),
+    recoverFromContainer: (
+      serverId: string,
+      containerName: string,
+      engine: string,
+    ): Promise<ContainerCredentialGuess | null> =>
+      ipcRenderer.invoke(IPC.credentialsRecoverFromContainer, {
+        serverId,
+        containerName,
+        engine,
+      }),
+  },
+
+  github: {
+    status: (): Promise<GithubStatus> => ipcRenderer.invoke(IPC.githubStatus),
+    startDeviceFlow: (): Promise<GithubDeviceFlowStart> =>
+      ipcRenderer.invoke(IPC.githubDeviceStart),
+    cancelDeviceFlow: (): Promise<{ ok: boolean }> =>
+      ipcRenderer.invoke(IPC.githubDeviceCancel),
+    connectWithToken: (token: string): Promise<GithubStatus> =>
+      ipcRenderer.invoke(IPC.githubConnectToken, { token }),
+    disconnect: (): Promise<GithubStatus> =>
+      ipcRenderer.invoke(IPC.githubDisconnect),
+    repos: (): Promise<GithubReposResult> => ipcRenderer.invoke(IPC.githubRepos),
+    installations: (): Promise<GithubInstallationsResult> =>
+      ipcRenderer.invoke(IPC.githubInstallations),
+    openInstall: (installationId?: number): Promise<{ ok: boolean; error?: string }> =>
+      ipcRenderer.invoke(IPC.githubOpenInstall, { installationId }),
+    authorizeServer: (serverId: string): Promise<{ ok: boolean; error?: string }> =>
+      ipcRenderer.invoke(IPC.githubAuthorizeServer, { serverId }),
+    deauthorizeServer: (serverId: string): Promise<{ ok: boolean; error?: string }> =>
+      ipcRenderer.invoke(IPC.githubDeauthorizeServer, { serverId }),
+    clone: (
+      serverId: string,
+      repoFullName: string,
+      destPath?: string,
+    ): Promise<GithubCloneResult> =>
+      ipcRenderer.invoke(IPC.githubClone, { serverId, repoFullName, destPath }),
+    onAuthEvent: (cb: (e: GithubAuthEvent) => void) =>
+      on<GithubAuthEvent>(IPC.evtGithubAuth, cb),
+  },
+
+  alerts: {
+    status: (): Promise<AlertsStatus> => ipcRenderer.invoke(IPC.alertsStatus),
+    connectToken: (token: string): Promise<TelegramConnectResult> =>
+      ipcRenderer.invoke(IPC.alertsConnectToken, { token }),
+    disconnect: (): Promise<AlertsStatus> =>
+      ipcRenderer.invoke(IPC.alertsDisconnect),
+    detectChat: (): Promise<TelegramChatDetectResult> =>
+      ipcRenderer.invoke(IPC.alertsDetectChat),
+    setChat: (chatId: string | null): Promise<AlertsStatus> =>
+      ipcRenderer.invoke(IPC.alertsSetChat, { chatId }),
+    test: (): Promise<TelegramTestResult> => ipcRenderer.invoke(IPC.alertsTest),
+    setConfig: (patch: AlertConfigPatch): Promise<AlertsStatus> =>
+      ipcRenderer.invoke(IPC.alertsSetConfig, patch),
+    setServer: (config: ServerAlertConfig): Promise<AlertsStatus> =>
+      ipcRenderer.invoke(IPC.alertsSetServer, config),
+    onEvent: (cb: (e: AlertEvent) => void) =>
+      on<AlertEvent>(IPC.evtAlert, cb),
   },
 };
 

@@ -1,0 +1,139 @@
+import {
+  AlertTriangleIcon,
+  CheckIcon,
+  Loader2Icon,
+  StopIcon,
+  XIcon,
+  type AppIcon,
+} from '@/lib/icons';
+import type {
+  ChatHistoryItem,
+  ChatSession,
+  ChatSessionKind,
+  ChatSessionStatus,
+} from '@/shared/ipc-types';
+
+export const CHAT_HISTORY_UPDATED_EVENT = 'easyhost:chat-history-updated';
+/** Dispatched by the sidebar when a saved session is picked, so the always-mounted
+ *  ChatPanel can hot-swap its feed without a remount. */
+export const CHAT_SESSION_SWITCH_EVENT = 'easyhost:chat-session-switch';
+/** Dispatched by the sidebar's "New chat" button; the ChatPanel starts a fresh draft. */
+export const CHAT_NEW_SESSION_EVENT = 'easyhost:chat-new-session';
+/** Dispatched when a saved wizard run is picked, so the always-mounted
+ *  WizardsView can open that run's transcript. */
+export const WIZARD_SESSION_SWITCH_EVENT = 'easyhost:wizard-session-switch';
+/** Dispatched to open a wizard pre-filled with specific values — e.g. the
+ *  Artifacts tab launching "Allow remote database access" for one database. */
+export const WIZARD_LAUNCH_EVENT = 'easyhost:wizard-launch';
+
+export type WizardLaunchDetail = {
+  playbookId: string;
+  serverId: string;
+  values: Record<string, string>;
+};
+
+export type ChatHistorySummary = {
+  id: string;
+  kind: ChatSessionKind;
+  title: string;
+  status?: ChatSessionStatus;
+  pinned: boolean;
+  messageCount: number;
+  updatedAt: number;
+};
+
+/** Sidebar/status-chip presentation for each session lifecycle state.
+ *  No bare dots (product decision): working states render a spinner, terminal
+ *  states a small tinted glyph — `iconClass` carries both tint and motion. */
+export const SESSION_STATUS_META: Record<
+  ChatSessionStatus,
+  { label: string; icon: AppIcon; iconClass: string }
+> = {
+  running: { label: 'Running…', icon: Loader2Icon, iconClass: 'animate-spin text-skill' },
+  done: { label: 'Succeeded', icon: CheckIcon, iconClass: 'text-success' },
+  error: { label: 'Failed', icon: XIcon, iconClass: 'text-destructive' },
+  cancelled: { label: 'Stopped', icon: StopIcon, iconClass: 'text-muted-foreground/60' },
+  interrupted: { label: 'Interrupted', icon: AlertTriangleIcon, iconClass: 'text-warning' },
+};
+
+export function sessionKind(session: ChatSession): ChatSessionKind {
+  return session.kind ?? 'chat';
+}
+
+export function newChatSessionId(): string {
+  return `s_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+}
+
+/**
+ * A persisted transcript can contain tools frozen at 'running' if the app
+ * died mid-run; render them as finished so they don't spin forever.
+ */
+export function markInterruptedToolsDone(items: ChatHistoryItem[]): ChatHistoryItem[] {
+  return items.map((item) =>
+    item.kind === 'tool' && item.status === 'running'
+      ? { ...item, status: 'done' as const }
+      : item,
+  );
+}
+
+export function summarizeChatSession(session: ChatSession): ChatHistorySummary | null {
+  const kind = sessionKind(session);
+  const textItems = session.items.filter((item) => item.kind === 'text');
+
+  if (kind === 'wizard') {
+    if (session.items.length === 0) return null;
+    return {
+      id: session.id,
+      kind,
+      title: session.title?.trim() || 'Wizard run',
+      status: session.status,
+      pinned: session.pinned === true,
+      messageCount: textItems.length,
+      updatedAt: session.updatedAt,
+    };
+  }
+
+  if (textItems.length === 0) return null;
+
+  const firstUserMessage =
+    textItems.find((item) => item.role === 'user')?.content.trim() ??
+    textItems[0]?.content.trim() ??
+    'Agent chat';
+
+  return {
+    id: session.id,
+    kind,
+    title: compactTitle(firstUserMessage),
+    status: session.status,
+    pinned: session.pinned === true,
+    messageCount: textItems.length,
+    updatedAt: session.updatedAt,
+  };
+}
+
+/**
+ * Sidebar History list ordering. Pinned rows float to the top; within the
+ * pinned group and within the unpinned group, most-recently-updated first.
+ * Array.sort is stable, so equal `updatedAt` values keep their input order.
+ */
+export function compareHistorySummaries(
+  a: ChatHistorySummary,
+  b: ChatHistorySummary,
+): number {
+  if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
+  return b.updatedAt - a.updatedAt;
+}
+
+/** Full pipeline used by the sidebar: sessions -> visible, ordered summaries. */
+export function summarizeChatHistory(sessions: ChatSession[]): ChatHistorySummary[] {
+  return sessions
+    .map(summarizeChatSession)
+    .filter((s): s is ChatHistorySummary => s !== null)
+    .sort(compareHistorySummaries);
+}
+
+function compactTitle(text: string): string {
+  const collapsed = text.replace(/\s+/g, ' ').trim();
+  if (collapsed.length === 0) return 'Agent chat';
+  return collapsed.length > 42 ? `${collapsed.slice(0, 39).trim()}...` : collapsed;
+}

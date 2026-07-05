@@ -22,6 +22,11 @@ Google Gemini.
   uptime, load, and top processes, polled over SSH. Pauses when the tab is hidden.
 - **Wizards** — guided, AI-driven playbooks: *Host a website/app* (nginx + TLS +
   deploy) and *Set up automated backups* (script + cron + test run).
+- **GitHub integration** — users connect their account through a GitHub App and
+  grant access to **all or selected repositories** (changeable on GitHub any
+  time). Authorized servers can then clone/pull/push those repos — including
+  private ones — and the agent can list them to deploy "my repo" by name. See
+  `docs/github-app-setup.md` for the one-time app registration.
 
 ## Safety
 
@@ -36,24 +41,61 @@ Google Gemini.
 
 ## Setup
 
-1. Add a Google Gemini API key to `.env` (see `.env.example`):
+1. Install [Bun](https://bun.sh) (matches FCode: `bun@1.3.12`, Node `^24.13.1`).
+2. Install dependencies:
+   ```sh
+   bun install
+   ```
+3. Copy `.env.example` to `.env` and add your Google Gemini API key:
+   ```sh
+   cp .env.example .env
+   ```
    ```
    GOOGLE_GENERATIVE_AI_API_KEY=your_key_here
    # AGENT_MODEL=gemini-3.5-flash   # optional override
    ```
    Get a key at https://aistudio.google.com/apikey
-2. Install dependencies with [Bun](https://bun.sh): `bun install`
-3. Run in development: `bun run start`
+
+   Optional — one-click "Connect GitHub" with per-repo access: register a
+   GitHub App (5 minutes, no server needed) and set `GITHUB_CLIENT_ID` +
+   `GITHUB_APP_SLUG`. Walkthrough: `docs/github-app-setup.md`.
+4. Run in development:
+   ```sh
+   bun run dev
+   ```
+
+### Runtime layout
+
+Same pattern as FCode:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `EASYHOST_HOME` | `~/.easyhost` | Runtime home (logs/state extensions) |
+| Electron `userData` | `~/Library/Application Support/easyhost-dev` (dev) or `easyhost` (prod) | Server profiles + encrypted credentials |
+
+Dev builds show as **EASY-HOST (Dev)** in the dock/title bar so you don't confuse them with a packaged install.
 
 ## Scripts
 
+Same standard workflow as FCode:
+
 | Command | What it does |
 |---|---|
-| `bun run start` | Launch the app in development (hot reload) |
-| `bun run package` | Build production bundles + package the app |
-| `bun run make` | Build distributables (zip/dmg/etc.) |
+| `bun run dev` | Launch in development (hot reload) |
+| `bun run electron:dev` | Dev with isolated data in `./.easyhost/electron-dev` |
+| `bun run start` | Same as `dev` |
+| `bun run build` | Build production bundles + package the app |
+| `bun run test` | Run unit tests (Vitest) |
+| `bun run typecheck` | Type-check with `tsc --noEmit` |
 | `bun run lint` | ESLint |
-| `npx tsc --noEmit` | Type-check |
+| `bun run make` | Build distributables (zip/dmg/etc.) |
+| `bun run clean` | Remove build artifacts and `node_modules` |
+
+Quality check (matches FCode CI locally):
+
+```sh
+bun run lint && bun run typecheck && bun run test && bun run build
+```
 
 ## Architecture
 

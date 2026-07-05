@@ -7,7 +7,8 @@ import {
   XAxis,
   YAxis,
 } from 'recharts';
-import { Cpu, MemoryStick, HardDrive, Clock } from 'lucide-react';
+import { SidebarGlyph } from '@/components/sidebarGlyphs';
+import { ClockIcon, CpuIcon, MemoryIcon, NetworkIcon } from '@/lib/icons';
 import { useServers } from '@/hooks/useServers';
 import { useMonitorStats } from '@/hooks/useMonitorStats';
 import type { ServerStats } from '@/shared/ipc-types';
@@ -68,25 +69,25 @@ export function MonitoringView({ serverId }: { serverId: string }) {
     <div className="h-full space-y-4 overflow-y-auto p-6">
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
         <StatCard
-          icon={<Cpu className="h-4 w-4" />}
+          icon={<SidebarGlyph icon={CpuIcon} variant="leading" />}
           label="CPU"
           value={`${latest.cpuPct.toFixed(0)}%`}
           sub={`load ${latest.loadAvg[0].toFixed(2)}`}
         />
         <StatCard
-          icon={<MemoryStick className="h-4 w-4" />}
+          icon={<SidebarGlyph icon={MemoryIcon} variant="leading" />}
           label="Memory"
           value={`${memPct.toFixed(0)}%`}
           sub={`${fmtBytes(latest.mem.usedBytes)} / ${fmtBytes(latest.mem.totalBytes)}`}
         />
         <StatCard
-          icon={<HardDrive className="h-4 w-4" />}
+          icon={<SidebarGlyph icon={NetworkIcon} variant="leading" />}
           label="Network"
           value={`${(latest.net.rxBps / 1024).toFixed(0)} KB/s`}
           sub={`↑ ${(latest.net.txBps / 1024).toFixed(0)} KB/s`}
         />
         <StatCard
-          icon={<Clock className="h-4 w-4" />}
+          icon={<SidebarGlyph icon={ClockIcon} variant="leading" />}
           label="Uptime"
           value={fmtUptime(latest.uptimeSec)}
           sub={`${latest.topProcesses.length} top procs`}
@@ -99,17 +100,33 @@ export function MonitoringView({ serverId }: { serverId: string }) {
             <AreaChart data={chartData}>
               <defs>
                 <linearGradient id="cpuG" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="0%" stopColor="#22c55e" stopOpacity={0.5} />
-                  <stop offset="100%" stopColor="#22c55e" stopOpacity={0} />
+                  <stop
+                    offset="0%"
+                    stopColor="var(--chart-2)"
+                    stopOpacity={0.45}
+                  />
+                  <stop
+                    offset="100%"
+                    stopColor="var(--chart-2)"
+                    stopOpacity={0}
+                  />
                 </linearGradient>
               </defs>
               <XAxis dataKey="i" hide />
-              <YAxis domain={[0, 100]} width={30} fontSize={11} />
-              <Tooltip contentStyle={tooltipStyle} />
+              <YAxis
+                domain={[0, 100]}
+                width={30}
+                fontSize={10}
+                stroke="var(--muted-foreground)"
+                tickLine={false}
+                axisLine={false}
+              />
+              <Tooltip contentStyle={tooltipStyle} cursor={{ stroke: 'var(--border)' }} />
               <Area
                 type="monotone"
                 dataKey="cpu"
-                stroke="#22c55e"
+                stroke="var(--chart-2)"
+                strokeWidth={1.5}
                 fill="url(#cpuG)"
                 isAnimationActive={false}
               />
@@ -122,17 +139,32 @@ export function MonitoringView({ serverId }: { serverId: string }) {
             <AreaChart data={chartData}>
               <defs>
                 <linearGradient id="netG" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="0%" stopColor="#3b82f6" stopOpacity={0.5} />
-                  <stop offset="100%" stopColor="#3b82f6" stopOpacity={0} />
+                  <stop
+                    offset="0%"
+                    stopColor="var(--chart-1)"
+                    stopOpacity={0.45}
+                  />
+                  <stop
+                    offset="100%"
+                    stopColor="var(--chart-1)"
+                    stopOpacity={0}
+                  />
                 </linearGradient>
               </defs>
               <XAxis dataKey="i" hide />
-              <YAxis width={36} fontSize={11} />
-              <Tooltip contentStyle={tooltipStyle} />
+              <YAxis
+                width={36}
+                fontSize={10}
+                stroke="var(--muted-foreground)"
+                tickLine={false}
+                axisLine={false}
+              />
+              <Tooltip contentStyle={tooltipStyle} cursor={{ stroke: 'var(--border)' }} />
               <Area
                 type="monotone"
                 dataKey="rx"
-                stroke="#3b82f6"
+                stroke="var(--chart-1)"
+                strokeWidth={1.5}
                 fill="url(#netG)"
                 isAnimationActive={false}
               />
@@ -142,22 +174,24 @@ export function MonitoringView({ serverId }: { serverId: string }) {
       </div>
 
       <div className="grid gap-4 lg:grid-cols-2">
-        <div className="rounded-lg border bg-card p-4">
-          <h3 className="mb-3 text-sm font-medium">Disks</h3>
-          <div className="space-y-2">
+        <div className="rounded-2xl border border-border bg-card p-5">
+          <h3 className="mb-3 text-[13px] font-semibold tracking-[-0.015em] text-ink">
+            Disks
+          </h3>
+          <div className="space-y-2.5">
             {latest.disks.map((d) => {
               const pct = d.totalBytes
                 ? (d.usedBytes / d.totalBytes) * 100
                 : 0;
               return (
-                <div key={d.mount} className="text-xs">
+                <div key={d.mount} className="text-[11px]">
                   <div className="flex justify-between text-muted-foreground">
-                    <span className="truncate">{d.mount}</span>
-                    <span>
+                    <span className="truncate font-mono">{d.mount}</span>
+                    <span className="tabular-nums">
                       {fmtBytes(d.usedBytes)} / {fmtBytes(d.totalBytes)}
                     </span>
                   </div>
-                  <div className="mt-1 h-1.5 rounded-full bg-muted">
+                  <div className="mt-1 h-1.5 rounded-full bg-secondary">
                     <div
                       className="h-1.5 rounded-full bg-primary"
                       style={{ width: `${Math.min(100, pct)}%` }}
@@ -169,22 +203,26 @@ export function MonitoringView({ serverId }: { serverId: string }) {
           </div>
         </div>
 
-        <div className="rounded-lg border bg-card p-4">
-          <h3 className="mb-3 text-sm font-medium">Top processes</h3>
-          <table className="w-full text-xs">
+        <div className="rounded-2xl border border-border bg-card p-5">
+          <h3 className="mb-3 text-[13px] font-semibold tracking-[-0.015em] text-ink">
+            Top processes
+          </h3>
+          <table className="w-full text-[11px]">
             <thead className="text-muted-foreground">
               <tr className="text-left">
-                <th className="pb-1 font-normal">CPU%</th>
-                <th className="pb-1 font-normal">MEM%</th>
-                <th className="pb-1 font-normal">Command</th>
+                <th className="pb-1.5 font-normal">CPU%</th>
+                <th className="pb-1.5 font-normal">MEM%</th>
+                <th className="pb-1.5 font-normal">Command</th>
               </tr>
             </thead>
             <tbody>
               {latest.topProcesses.slice(0, 8).map((p) => (
-                <tr key={p.pid} className="border-t border-border/40">
+                <tr key={p.pid} className="border-t border-border">
                   <td className="py-1 tabular-nums">{p.cpu.toFixed(1)}</td>
                   <td className="py-1 tabular-nums">{p.mem.toFixed(1)}</td>
-                  <td className="truncate py-1 font-mono">{p.command}</td>
+                  <td className="truncate py-1 font-mono text-foreground">
+                    {p.command}
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -196,10 +234,12 @@ export function MonitoringView({ serverId }: { serverId: string }) {
 }
 
 const tooltipStyle = {
-  background: '#18181b',
-  border: '1px solid #27272a',
+  background: 'var(--popover)',
+  border: '1px solid var(--border)',
   borderRadius: 8,
-  fontSize: 12,
+  fontSize: 11,
+  color: 'var(--foreground)',
+  boxShadow: 'none',
 };
 
 function StatCard({
@@ -214,13 +254,15 @@ function StatCard({
   sub: string;
 }) {
   return (
-    <div className="rounded-lg border bg-card p-4">
+    <div className="rounded-2xl border border-border bg-card p-4">
       <div className="flex items-center gap-2 text-muted-foreground">
         {icon}
-        <span className="text-xs">{label}</span>
+        <span className="text-[11px]">{label}</span>
       </div>
-      <div className="mt-2 text-2xl font-semibold tabular-nums">{value}</div>
-      <div className="text-xs text-muted-foreground">{sub}</div>
+      <div className="mt-2 text-[22px] leading-none font-semibold tabular-nums text-ink">
+        {value}
+      </div>
+      <div className="mt-1 text-[11px] text-muted-foreground">{sub}</div>
     </div>
   );
 }
@@ -233,8 +275,10 @@ function ChartCard({
   children: React.ReactNode;
 }) {
   return (
-    <div className="rounded-lg border bg-card p-4">
-      <h3 className="mb-2 text-sm font-medium">{title}</h3>
+    <div className="rounded-2xl border border-border bg-card p-5">
+      <h3 className="mb-3 text-[13px] font-semibold tracking-[-0.015em] text-ink">
+        {title}
+      </h3>
       {children}
     </div>
   );

@@ -60,3 +60,34 @@ export function deleteSecret(serverId: string): void {
     /* already gone */
   }
 }
+
+// --- raw string secrets (non-server credentials, e.g. the GitHub token) -----
+
+export function saveRawSecret(id: string, value: string): void {
+  if (!secretsAvailable()) {
+    throw new Error(
+      'OS secure storage is unavailable — cannot store credentials safely. ' +
+        'On Linux, ensure a keyring (gnome-keyring / kwallet) is running.',
+    );
+  }
+  const encrypted = safeStorage.encryptString(value);
+  const tmp = `${secretPath(id)}.tmp`;
+  fs.writeFileSync(tmp, encrypted);
+  fs.renameSync(tmp, secretPath(id));
+}
+
+export function loadRawSecret(id: string): string | undefined {
+  try {
+    return safeStorage.decryptString(fs.readFileSync(secretPath(id)));
+  } catch {
+    return undefined;
+  }
+}
+
+export function deleteRawSecret(id: string): void {
+  try {
+    fs.unlinkSync(secretPath(id));
+  } catch {
+    /* already gone */
+  }
+}

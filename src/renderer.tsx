@@ -8,11 +8,28 @@
 import './index.css';
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
+import { ThemeProvider } from 'next-themes';
 import App from './App';
+import { ErrorBoundary } from './components/ErrorBoundary';
 
 const root = createRoot(document.getElementById('root')!);
 root.render(
   <StrictMode>
-    <App />
+    {/*
+     * Codex/FCode appearance model: `.dark` toggled on <html>, System-first.
+     * next-themes writes the class our design tokens key off and follows the
+     * OS `prefers-color-scheme` while the user stays on "system".
+     */}
+    <ThemeProvider
+      attribute="class"
+      defaultTheme="system"
+      enableSystem
+      disableTransitionOnChange
+      storageKey="easyhost:theme"
+    >
+      <ErrorBoundary>
+        <App />
+      </ErrorBoundary>
+    </ThemeProvider>
   </StrictMode>,
 );

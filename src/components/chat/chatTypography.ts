@@ -1,0 +1,10 @@
+export const USER_MESSAGE_BUBBLE_RADIUS_CLASS_NAME = 'rounded-[var(--radius-user-message)]';
+export const USER_MESSAGE_BUBBLE_SHELL_PADDING_CLASS_NAME = 'py-2.5';
+export const USER_MESSAGE_BUBBLE_SHELL_HORIZONTAL_PADDING_CLASS_NAME = 'px-4';
+export const USER_MESSAGE_BUBBLE_SHELL_CHROME_CLASS_NAME = [
+  USER_MESSAGE_BUBBLE_SHELL_HORIZONTAL_PADDING_CLASS_NAME,
+  USER_MESSAGE_BUBBLE_SHELL_PADDING_CLASS_NAME,
+].join(' ');
+
+export const CHAT_TRANSCRIPT_TEXT_CLASS_NAME =
+  'font-sans text-xs leading-relaxed text-foreground';

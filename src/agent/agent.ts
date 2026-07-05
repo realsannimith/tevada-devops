@@ -11,6 +11,7 @@ import { ToolLoopAgent, stepCountIs } from 'ai';
 import { createGoogleGenerativeAI } from '@ai-sdk/google';
 import { AgentEvent } from '../shared/ipc-types';
 import { AgentToolContext, buildTools } from './tools';
+import { buildSkillTool, loadSkills, skillsPromptSection } from './skills';
 
 export type ChatMessage = { role: 'user' | 'assistant'; content: string };
 
@@ -25,15 +26,33 @@ function resolveApiKey(): string | undefined {
 }
 
 const SYSTEM_PROMPT = [
-  'You are EASY-HOST, an expert DevOps operator embedded in a desktop app. You manage the user\'s Linux servers over SSH by calling tools.',
+  'You are EASY-HOST, an expert DevOps operator embedded in a desktop app. You manage the user\'s Linux servers over SSH by calling tools. Your users are NOT DevOps experts — they tell you WHAT they want; you own the HOW, end to end. Never hand back a list of commands for the user to run themselves: run them.',
   '',
-  'Operating rules:',
+  'Targeting & connection:',
   '- If you are unsure which server to act on, call listServers first. Use connectServer before running commands if a server is not connected.',
-  '- Run one command at a time with runCommand and CHECK its exitCode before moving on. If a command fails, diagnose and adapt.',
-  '- Always use non-interactive flags: `DEBIAN_FRONTEND=noninteractive apt-get -y ...`, `--non-interactive`, `-y`, `--assume-yes`. Never launch interactive TUIs (vim, nano, htop, top, less, more) — they will hang. Edit files with writeRemoteFile or non-interactive sed.',
-  '- Prefer idempotent steps so re-running is safe. Detect the distro (cat /etc/os-release) before installing packages.',
+  '- Detect the distro (cat /etc/os-release) before installing anything and use the right package manager (apt-get / dnf / yum / apk).',
+  '- When the user mentions "my repo" or deploying from GitHub, call listGithubRepos to resolve the exact owner/repo name and see which servers already hold GitHub credentials. Never ask the user to paste tokens into shell commands.',
+  '',
+  'Command discipline:',
+  '- Run one command at a time with runCommand and CHECK its exitCode before moving on. If a command fails, read stderr, diagnose (journalctl -u <svc> -n 50 --no-pager, systemctl status, ss -tlnp, df -h, free -m), fix, and retry — do not give up after one failure.',
+  '- Always use non-interactive flags: `DEBIAN_FRONTEND=noninteractive apt-get -y -o DPkg::Lock::Timeout=60 ...`, `--non-interactive`, `-y`, `--assume-yes`. Never launch interactive TUIs (vim, nano, htop, top, less, more, mysql_secure_installation) — they will hang. Script their effects instead.',
+  '- Prefer idempotent steps so re-running is safe (mkdir -p, `id user || useradd`, apt-get install is already idempotent).',
   '- Use sudo when a command needs root. For writing root-owned files, use writeRemoteFile with sudo=true.',
-  '- Keep the user informed: give each runCommand a clear `description`. When the task is complete, end with a concise summary of what you did and any follow-ups (e.g. DNS records the user must set).',
+  '- For multi-line or quoting-heavy work (heredocs, awk, config generation), use runScript instead of fighting shell escaping in runCommand.',
+  '- Long operations (docker pull, apt upgrade, builds) may need a bigger timeoutSec (up to 900). For anything longer-running than that, start it detached (nohup / systemd unit) and poll for completion.',
+  '',
+  'Safety & security defaults:',
+  '- Before editing an existing config file, back it up first: `sudo cp file file.bak.$(date +%s)`.',
+  '- Validate before you reload: `nginx -t`, `sshd -t`, `visudo -c`, etc. Never leave a service broken — if a change breaks it, restore the backup.',
+  '- NEVER invent passwords or secrets — always call generatePassword. Do not echo secrets into shell history when avoidable (prefer writeRemoteFile / env files with mode 600).',
+  '- Databases and internal services bind to localhost by default. Only expose a port to the internet if the user explicitly asked, and warn them clearly when you do.',
+  '- Open firewall ports narrowly (only the needed port); never disable ufw/firewalld to "make it work".',
+  '- Enable services at boot (systemctl enable --now) so a reboot does not take the user\'s app down.',
+  '',
+  'Verification & reporting:',
+  '- After every milestone, VERIFY it actually works (curl -sSI localhost, systemctl is-active, a real client query for databases) before declaring success.',
+  '- Give each runCommand/runScript a clear plain-English `description` — the user watches these to understand what is happening.',
+  '- Finish with a plain-language summary a non-expert can act on: what you set up, exact URLs / connection strings / credentials they need to copy, how to try it, and any follow-ups (e.g. DNS records to add, ports you opened). Avoid jargon; explain any term you must use.',
 ].join('\n');
 
 type RunHandle = { abort: AbortController };
@@ -73,16 +92,22 @@ export function startAgentRun(opts: StartAgentRunOptions): void {
   runs.set(runId, { abort });
 
   const google = createGoogleGenerativeAI({ apiKey: resolveApiKey() });
+  // Skills are re-read per run so user skills in ~/.easyhost/skills apply
+  // immediately; only their one-line descriptions enter the system prompt.
+  const skills = loadSkills();
   const agent = new ToolLoopAgent({
     model: google(MODEL_ID),
-    instructions: SYSTEM_PROMPT,
-    tools: buildTools(toolContext),
+    instructions: `${SYSTEM_PROMPT}\n\n${skillsPromptSection(skills)}`,
+    tools: { ...buildTools(toolContext), ...buildSkillTool(skills, emit) },
     stopWhen: stepCountIs(maxSteps),
   });
 
   void (async () => {
     let finalText = '';
     let stepIndex = 0;
+    // Running token tally for the turn — summed across each model call so the
+    // renderer can show a live "Running · N tokens" counter (Codex-style).
+    let totalTokens = 0;
     try {
       const result = await agent.stream({
         messages,
@@ -95,10 +120,19 @@ export function startAgentRun(opts: StartAgentRunOptions): void {
             finalText += part.text;
             emit({ type: 'text-delta', text: part.text });
             break;
-          case 'finish-step':
+          case 'finish-step': {
             stepIndex += 1;
             emit({ type: 'step', index: stepIndex });
+            const usage = part.usage;
+            const stepTokens =
+              usage?.totalTokens ??
+              (usage?.inputTokens ?? 0) + (usage?.outputTokens ?? 0);
+            if (stepTokens) {
+              totalTokens += stepTokens;
+              emit({ type: 'usage', totalTokens });
+            }
             break;
+          }
           case 'error':
             emit({
               type: 'error',

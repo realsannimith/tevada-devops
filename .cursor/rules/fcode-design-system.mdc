@@ -1,0 +1,29 @@
+---
+description: FCode/Codex UI design system for EASY-HOST renderer
+globs: EASY-HOST/src/**/*.{tsx,css}
+alwaysApply: false
+---
+
+# FCode design system (EASY-HOST)
+
+Match FCode: dense native dev tool, monochrome canvas, hairline depth, ink CTAs.
+
+## Surfaces
+- Main columns: `bg-background` (never `bg-card`)
+- Composer / grouped forms: `.composer` or `.surface-panel` + `--composer-surface`
+- Dividers: `.chat-surface-divider` / `.chat-surface-divider-vertical` — not raw `border-border` splits
+
+## Actions
+- Primary run/send/stop: `Button variant="prominent"` (ink, rounded-full)
+- Do not use `variant="default"` (blue) for full-width wizard/chat actions
+
+## Agent UI
+- Reuse `AgentFeed`, `chatTypography.ts`, ChatPanel header pattern (skill-chip + subtitle)
+
+## Forms
+- Labels: `text-[11px] text-muted-foreground`
+- Controls: `w-full bg-secondary border-border` inside `surface-panel divide-y`
+
+## Reference files
+- `EASY-HOST/AGENTS.md` (full rules)
+- `EASY-HOST/src/index.css`, `ChatPanel.tsx`, `WizardsView.tsx`

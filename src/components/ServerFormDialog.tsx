@@ -297,7 +297,7 @@ export function ServerFormDialog({
                       {generating ? 'Generating…' : 'Generate an SSH key'}
                     </Button>
                   ) : (
-                    <div className="space-y-2 rounded-md border bg-muted/40 p-3">
+                    <div className="space-y-2 rounded-md border border-border bg-secondary/60 p-3">
                       <div className="flex items-center justify-between">
                         <Label className="text-xs">
                           Your public key — copy & paste it into {prov.label}
@@ -309,14 +309,14 @@ export function ServerFormDialog({
                           onClick={copyKey}
                         >
                           {copied ? (
-                            <Check className="h-3.5 w-3.5 text-green-500" />
+                            <Check className="h-3.5 w-3.5 text-success" />
                           ) : (
                             <Copy className="h-3.5 w-3.5" />
                           )}
                           {copied ? 'Copied' : 'Copy'}
                         </Button>
                       </div>
-                      <pre className="max-h-24 overflow-auto rounded bg-background p-2 font-mono text-[11px] leading-relaxed break-all whitespace-pre-wrap">
+                      <pre className="max-h-24 overflow-auto rounded-md bg-card p-2 font-mono text-[11px] leading-relaxed break-all whitespace-pre-wrap text-ink">
                         {genPublicKey}
                       </pre>
                       <p className="text-xs text-muted-foreground">
@@ -367,7 +367,7 @@ export function ServerFormDialog({
           {msg && (
             <p
               className={
-                msg.ok ? 'text-sm text-green-500' : 'text-sm text-destructive'
+                msg.ok ? 'text-xs text-success' : 'text-xs text-destructive'
               }
             >
               {msg.text}

@@ -130,10 +130,12 @@ export class ConnectionManager {
       let settled = false;
       client
         .on('ready', () => {
+          client.setNoDelay(true); // re-assert in case the socket was created late
           this.setStatus(profile.id, 'connected');
           settled = true;
           resolve({ ok: true });
         })
+
         .on('error', (err) => {
           this.setStatus(profile.id, 'error', err.message);
           if (!settled) {
@@ -158,6 +160,12 @@ export class ConnectionManager {
           }
         })
         .connect(this.buildConfig(profile, secret));
+
+      // Interactive typing dies by Nagle's algorithm: without TCP_NODELAY each
+      // keystroke packet can sit in the send buffer waiting on the previous
+      // ACK (40–200ms of echo jitter). OpenSSH disables Nagle for interactive
+      // sessions; so do we. Safe to call pre-connect — node queues it.
+      client.setNoDelay(true);
     });
   }
 

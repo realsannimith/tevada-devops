@@ -23,10 +23,29 @@ type Cached = {
 
 const cache = new Map<string, Cached>();
 
+// Neutral canvas-dark terminal surface (design: canvas-under). Magenta maps to
+// the agent/skill violet; the accent blue carries the cursor.
 const THEME = {
-  background: '#0a0a0a',
-  foreground: '#e4e4e7',
-  cursor: '#e4e4e7',
+  background: '#0e0e0e',
+  foreground: '#e5e5e5',
+  cursor: '#339cff',
+  cursorAccent: '#0e0e0e',
+  selectionBackground: 'rgba(51,156,255,0.25)',
+  black: '#0e0e0e',
+  brightBlack: '#737373',
+  red: '#fa423e',
+  brightRed: '#fa423e',
+  green: '#40c977',
+  brightGreen: '#40c977',
+  yellow: '#f59e0b',
+  brightYellow: '#f59e0b',
+  blue: '#339cff',
+  brightBlue: '#339cff',
+  magenta: '#ad7bf9',
+  brightMagenta: '#ad7bf9',
+  cyan: '#40c977',
+  white: '#e5e5e5',
+  brightWhite: '#f5f5f5',
 };
 
 function getOrCreate(serverId: string): Cached {
@@ -40,8 +59,10 @@ function getOrCreate(serverId: string): Cached {
 
   const term = new Terminal({
     fontFamily:
-      'ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace',
-    fontSize: 13,
+      '"JetBrainsMono NFM", "JetBrainsMono NF", "JetBrains Mono Variable", "JetBrains Mono", ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace',
+    fontSize: 12,
+    lineHeight: 1.4,
+    letterSpacing: 0,
     cursorBlink: true,
     theme: THEME,
     scrollback: 5000,
@@ -169,7 +190,7 @@ export function TerminalView({ serverId }: { serverId: string }) {
 
   if (status !== 'connected') {
     return (
-      <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
+      <div className="flex h-full items-center justify-center text-xs text-muted-foreground">
         {status === 'connecting'
           ? 'Connecting…'
           : 'Not connected. Connect this server to open a terminal.'}
@@ -177,7 +198,7 @@ export function TerminalView({ serverId }: { serverId: string }) {
     );
   }
 
-  return <div ref={hostRef} className="h-full w-full bg-[#0a0a0a] p-2" />;
+  return <div ref={hostRef} className="h-full w-full bg-[#0e0e0e] p-3" />;
 }
 
 /** Called when a server is removed/disconnected to free its cached terminal. */

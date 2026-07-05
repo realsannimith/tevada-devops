@@ -7,27 +7,14 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type {
   AgentEvent,
   AgentStartRequest,
+  ChatHistoryItem,
+  ChatTextHistoryItem,
+  ChatToolHistoryItem,
 } from '@/shared/ipc-types';
 
-export type ToolFeedItem = {
-  kind: 'tool';
-  toolCallId: string;
-  tool: string;
-  description?: string;
-  command?: string;
-  output?: string;
-  exitCode?: number | null;
-  status: 'running' | 'done';
-};
-
-export type TextFeedItem = {
-  kind: 'text';
-  id: string;
-  role: 'user' | 'assistant';
-  content: string;
-};
-
-export type FeedItem = ToolFeedItem | TextFeedItem;
+export type ToolFeedItem = ChatToolHistoryItem;
+export type TextFeedItem = ChatTextHistoryItem;
+export type FeedItem = ChatHistoryItem;
 
 export type PendingApproval = {
   approvalId: string;
@@ -36,13 +23,23 @@ export type PendingApproval = {
   reason: string;
 };
 
+/** How the last attached run ended; null while running or before any run. */
+export type RunOutcome = 'done' | 'error' | 'cancelled';
+
 export function useAgentRun() {
   const [feed, setFeed] = useState<FeedItem[]>([]);
   const [running, setRunning] = useState(false);
+  // Live token tally for the in-flight turn (0 when idle) — drives the
+  // "Running · N tokens" status indicator.
+  const [tokens, setTokens] = useState(0);
   const [error, setError] = useState<string | null>(null);
+  const [outcome, setOutcome] = useState<RunOutcome | null>(null);
   const [approval, setApproval] = useState<PendingApproval | null>(null);
   const runIdRef = useRef<string | null>(null);
   const assistantIdRef = useRef<string | null>(null);
+  // The agent emits 'error' mid-stream and still closes with 'done'; remember
+  // the failure so the final outcome reads 'error', not 'done'.
+  const sawErrorRef = useRef(false);
 
   useEffect(() => {
     const unsub = window.easyhost.agent.onEvent(({ runId, event }) => {
@@ -92,7 +89,9 @@ export function useAgentRun() {
             description: event.description,
             command:
               event.args && typeof event.args === 'object'
-                ? (event.args as { command?: string }).command
+                ? ((event.args as { command?: string; script?: string })
+                    .command ??
+                  (event.args as { script?: string }).script)
                 : undefined,
             status: 'running',
           },
@@ -108,11 +107,14 @@ export function useAgentRun() {
                   exitCode:
                     (event.result as { exitCode?: number | null })?.exitCode ??
                     null,
-                  output: formatResult(event.result),
+                  output: formatAgentToolResult(event.result),
                 }
               : it,
           ),
         );
+        break;
+      case 'usage':
+        setTokens(event.totalTokens);
         break;
       case 'approval-required':
         setApproval({
@@ -123,15 +125,18 @@ export function useAgentRun() {
         });
         break;
       case 'error':
+        sawErrorRef.current = true;
         setError(event.message);
         break;
       case 'done':
         setRunning(false);
         runIdRef.current = null;
+        setOutcome(sawErrorRef.current ? 'error' : 'done');
         break;
       case 'cancelled':
         setRunning(false);
         runIdRef.current = null;
+        setOutcome('cancelled');
         setFeed((f) => [
           ...f,
           {
@@ -149,6 +154,9 @@ export function useAgentRun() {
 
   const start = useCallback(async (req: AgentStartRequest, userEcho?: string) => {
     setError(null);
+    setOutcome(null);
+    setTokens(0);
+    sawErrorRef.current = false;
     setRunning(true);
     assistantIdRef.current = null;
     if (userEcho) {
@@ -180,23 +188,48 @@ export function useAgentRun() {
   );
 
   const clear = useCallback(() => {
+    // Full reset: also detach from any in-flight run so its late events
+    // (cancelled marker, trailing tool-ends) can't leak into a fresh chat.
+    runIdRef.current = null;
+    assistantIdRef.current = null;
+    sawErrorRef.current = false;
+    setRunning(false);
+    setApproval(null);
     setFeed([]);
     setError(null);
+    setOutcome(null);
+    setTokens(0);
+  }, []);
+
+  const replaceFeed = useCallback((items: FeedItem[]) => {
+    setFeed(items);
+    setTokens(0);
+    setError(null);
+    // Loading a transcript means the previous live run's outcome no longer
+    // describes what's on screen.
+    setOutcome(null);
+    sawErrorRef.current = false;
+    assistantIdRef.current = null;
   }, []);
 
   return {
     feed,
     running,
+    tokens,
     error,
+    outcome,
     approval,
     start,
     cancel,
     respondApproval,
     clear,
+    replaceFeed,
   };
 }
 
-function formatResult(result: unknown): string {
+/** Render a tool call's raw result object into the transcript's output text.
+ *  Shared with chatRunManager, which reduces background runs the same way. */
+export function formatAgentToolResult(result: unknown): string {
   if (result == null) return '';
   const r = result as Record<string, unknown>;
   if (typeof r.error === 'string') return `error: ${r.error}`;

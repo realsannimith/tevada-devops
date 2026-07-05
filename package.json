@@ -6,11 +6,17 @@
   "main": ".vite/build/main.js",
   "private": true,
   "scripts": {
-    "start": "electron-forge start",
+    "dev": "node scripts/dev.mjs",
+    "electron:dev": "node scripts/dev.mjs --home-dir ./.easyhost/electron-dev",
+    "start": "node scripts/dev.mjs",
+    "build": "electron-forge package",
     "package": "electron-forge package",
     "make": "electron-forge make",
     "publish": "electron-forge publish",
-    "lint": "eslint --ext .ts,.tsx ."
+    "lint": "eslint --ext .ts,.tsx .",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --passWithNoTests",
+    "clean": "rm -rf node_modules .vite out dist coverage"
   },
   "keywords": [],
   "author": "sannimith",
@@ -41,11 +47,14 @@
     "eslint-plugin-import": "^2.32.0",
     "tailwindcss": "^4.3.2",
     "typescript": "^5.6",
-    "vite": "^5.4.21"
+    "vite": "^5.4.21",
+    "vitest": "^4.0.0"
   },
   "dependencies": {
     "@ai-sdk/google": "^4.0.8",
     "@fontsource-variable/geist": "^5.2.9",
+    "@fontsource-variable/jetbrains-mono": "^5.2.8",
+    "@tabler/icons-react": "^3.44.0",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/addon-webgl": "^0.19.0",
     "@xterm/xterm": "^6.0.0",
@@ -59,13 +68,21 @@
     "radix-ui": "^1.6.1",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
+    "react-markdown": "^10.1.0",
     "recharts": "^3.9.1",
+    "remark-gfm": "^4.0.1",
     "shadcn": "^4.12.0",
+    "shiki": "^4.3.1",
     "sonner": "^2.0.7",
     "ssh2": "^1.17.0",
     "sshpk": "^1.18.0",
     "tailwind-merge": "^3.6.0",
     "tw-animate-css": "^1.4.0",
     "zod": "^4.4.3"
-  }
+  },
+  "engines": {
+    "bun": "^1.3.9",
+    "node": "^24.13.1"
+  },
+  "packageManager": "bun@1.3.12"
 }

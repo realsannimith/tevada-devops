@@ -88,5 +88,11 @@ typings/
 # Vite
 .vite/
 
+# Local runtime home (FCode-style isolated dev data)
+.easyhost/
+
 # Electron-Forge
 out/
+
+# Build output
+dist/

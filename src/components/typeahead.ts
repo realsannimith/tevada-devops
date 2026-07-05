@@ -14,7 +14,9 @@
  */
 import type { Terminal } from '@xterm/xterm';
 
-type Glyph = { el: HTMLSpanElement; col: number; row: number };
+// A 'char' glyph predicts an insertion; a 'blank' glyph predicts a backspace
+// (it paints the terminal background over the character being deleted).
+type Glyph = { el: HTMLSpanElement; col: number; row: number; kind: 'char' | 'blank' };
 
 // Server prompts that don't echo what you type — suppress predictions here so we
 // never paint password characters on screen.
@@ -31,6 +33,10 @@ export class TypeaheadController {
   private overlay: HTMLDivElement;
   private noEcho = false;
   private expiry: ReturnType<typeof setTimeout> | null = null;
+  // How many of OUR predictions the server has confirmed on the current line.
+  // This is the safe budget for backspace prediction: we only blank out cells
+  // we previously predicted and saw echoed, so we can never hide prompt text.
+  private confirmedRun = 0;
 
   constructor(
     private term: Terminal,
@@ -59,9 +65,25 @@ export class TypeaheadController {
     }
 
     if (data === '\x7f' || data === '\b') {
-      // Backspace: retract the last prediction (only if we made one).
-      const g = this.glyphs.pop();
-      if (g) g.el.remove();
+      const last = this.glyphs[this.glyphs.length - 1];
+      if (last?.kind === 'char') {
+        // Retract a still-pending insertion prediction.
+        this.glyphs.pop();
+        last.el.remove();
+      } else if (this.confirmedRun > 0) {
+        // Predict deletion of a confirmed character by painting background
+        // over it. Bounded by confirmedRun so we never blank prompt text.
+        const cell = last
+          ? { col: last.col - 1, row: last.row }
+          : {
+              col: this.term.buffer.active.cursorX - 1,
+              row: this.term.buffer.active.cursorY,
+            };
+        if (cell.col >= 0) {
+          this.addGlyph(' ', cell.col, cell.row, 'blank');
+          this.confirmedRun--;
+        }
+      }
       this.arm();
       return;
     }
@@ -73,7 +95,7 @@ export class TypeaheadController {
         this.clear(); // avoid line-wrap prediction complexity
         return;
       }
-      this.addGlyph(data, cur.col, cur.row);
+      this.addGlyph(data, cur.col, cur.row, 'char');
       this.arm();
       return;
     }
@@ -93,12 +115,14 @@ export class TypeaheadController {
     }
     if (this.noEcho && /[\r\n]/.test(data)) this.noEcho = false;
 
-    if (this.glyphs.length === 0) return;
-
     if (!PLAIN_ECHO.test(data)) {
-      this.clear(); // server repainted / moved cursor — our model is stale
+      // Server repainted / moved the cursor — our column model AND the
+      // backspace budget are stale, even if no predictions are pending.
+      this.clear();
       return;
     }
+
+    if (this.glyphs.length === 0) return;
 
     // Partial confirmation: drop predictions the real cursor has reached or
     // passed; keep the ones still ahead of it (reduces flicker on fast typing).
@@ -106,7 +130,11 @@ export class TypeaheadController {
     const row = this.term.buffer.active.cursorY;
     this.glyphs = this.glyphs.filter((g) => {
       const passed = g.row < row || (g.row === row && g.col < col);
-      if (passed) g.el.remove();
+      if (passed) {
+        g.el.remove();
+        // Each confirmed insertion grows the backspace-prediction budget.
+        if (g.kind === 'char') this.confirmedRun++;
+      }
       return !passed;
     });
   }
@@ -114,7 +142,11 @@ export class TypeaheadController {
   /** Where the next predicted glyph goes. */
   private nextCell(): { col: number; row: number } {
     const last = this.glyphs[this.glyphs.length - 1];
-    if (last) return { col: last.col + 1, row: last.row };
+    // After a char the cursor is one past it; a blank (predicted backspace)
+    // leaves the cursor ON that cell, so the next char overwrites it.
+    if (last) {
+      return { col: last.kind === 'char' ? last.col + 1 : last.col, row: last.row };
+    }
     return {
       col: this.term.buffer.active.cursorX,
       row: this.term.buffer.active.cursorY,
@@ -136,7 +168,12 @@ export class TypeaheadController {
     };
   }
 
-  private addGlyph(char: string, col: number, row: number): void {
+  private addGlyph(
+    char: string,
+    col: number,
+    row: number,
+    kind: 'char' | 'blank',
+  ): void {
     const { w, h, left, top } = this.cellSize();
     if (w === 0) return;
     const el = document.createElement('span');
@@ -157,7 +194,7 @@ export class TypeaheadController {
       overflow: 'hidden',
     } as CSSStyleDeclaration);
     this.overlay.appendChild(el);
-    this.glyphs.push({ el, col, row });
+    this.glyphs.push({ el, col, row, kind });
   }
 
   /** Predictions that are never confirmed (e.g. no-echo contexts) self-expire. */
@@ -169,6 +206,7 @@ export class TypeaheadController {
   clear(): void {
     for (const g of this.glyphs) g.el.remove();
     this.glyphs = [];
+    this.confirmedRun = 0;
     if (this.expiry) {
       clearTimeout(this.expiry);
       this.expiry = null;
