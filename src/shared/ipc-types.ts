@@ -114,7 +114,7 @@ export type ServerArtifact = {
   kind: ArtifactKind;
   name: string;
   status: ArtifactStatus;
-  /** Icon hint: 'postgresql' | 'mysql' | 'redis' | 'mongodb' | 'docker' | 'node' | 'nginx' … */
+  /** Icon hint: 'postgresql' | 'mysql' | 'mariadb' | 'redis' | 'mongodb' | 'docker' | 'node' | 'nginx' … */
   engine?: string;
   /** One-line description — image, doc root, proxy target, dump command… */
   detail?: string;
@@ -129,6 +129,31 @@ export type ServerArtifact = {
 
 export type ArtifactsScanResult =
   | { ok: true; ts: number; artifacts: ServerArtifact[] }
+  | { ok: false; error: string };
+
+/** Lifecycle verbs the Artifacts tab can apply to a container or service row. */
+export type ArtifactAction = 'start' | 'stop' | 'restart';
+
+/** What actually runs the artifact — decides `docker` vs `systemctl`. Derived
+ *  in the renderer from the artifact id prefix ("container:…" / "service:…"). */
+export type ArtifactRuntime = 'container' | 'service';
+
+export type ArtifactActionRequest = {
+  serverId: string;
+  runtime: ArtifactRuntime;
+  /** Docker container name, or systemd unit without the .service suffix. */
+  name: string;
+  action: ArtifactAction;
+};
+
+export type ArtifactLogsRequest = {
+  serverId: string;
+  runtime: ArtifactRuntime;
+  name: string;
+};
+
+export type ArtifactLogsResult =
+  | { ok: true; content: string }
   | { ok: false; error: string };
 
 // ---------------------------------------------------------------------------
@@ -149,7 +174,7 @@ export type ArtifactsScanResult =
 export type DatabaseCredentialMeta = {
   id: string;
   serverId: string;
-  /** 'postgresql' | 'mysql' | 'redis' | 'mongodb' — matches ServerArtifact.engine. */
+  /** 'postgresql' | 'mysql' | 'mariadb' | 'redis' | 'mongodb' — matches ServerArtifact.engine. */
   engine: string;
   /** Internal host — reachable from the server itself / other containers. Normally 127.0.0.1. */
   host: string;
@@ -222,6 +247,9 @@ export type AgentEvent =
     }
   | { type: 'tool-log'; toolCallId: string; chunk: string }
   | { type: 'tool-end'; toolCallId: string; result: unknown }
+  /** The agent's task checklist changed (updateTodos tool) — carries the full
+   *  current list, which replaces whatever the transcript showed before. */
+  | { type: 'todos'; todos: TodoItem[] }
   | {
       type: 'approval-required';
       approvalId: string;
@@ -257,7 +285,30 @@ export type ChatToolHistoryItem = {
   status: 'running' | 'done';
 };
 
-export type ChatHistoryItem = ChatTextHistoryItem | ChatToolHistoryItem;
+/** One entry in the agent's task checklist (the `updateTodos` tool). */
+export type TodoStatus = 'pending' | 'in_progress' | 'completed';
+
+export type TodoItem = {
+  text: string;
+  status: TodoStatus;
+};
+
+/**
+ * The agent's live task list, rendered as a single evolving checklist card in
+ * the transcript. There is at most one per session — `updateTodos` replaces the
+ * whole list each call, so the reducer updates this item in place rather than
+ * appending a new one, and the user watches boxes tick off as work completes.
+ */
+export type ChatTodoHistoryItem = {
+  kind: 'todos';
+  id: string;
+  todos: TodoItem[];
+};
+
+export type ChatHistoryItem =
+  | ChatTextHistoryItem
+  | ChatToolHistoryItem
+  | ChatTodoHistoryItem;
 
 /** Sessions record both free-form agent chats and wizard (playbook) runs. */
 export type ChatSessionKind = 'chat' | 'wizard';
@@ -606,6 +657,8 @@ export const IPC = {
   playbooksList: 'playbooks:list',
   // artifacts (invoke)
   artifactsScan: 'artifacts:scan',
+  artifactsAction: 'artifacts:action',
+  artifactsLogs: 'artifacts:logs',
   // github auto-deploys (invoke)
   deploysList: 'deploys:list',
   deploysLog: 'deploys:log',

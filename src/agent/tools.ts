@@ -275,11 +275,11 @@ export function buildTools(ctx: AgentToolContext) {
 
     saveDatabaseCredential: tool({
       description:
-        "Persist a database's connection details (encrypted, via the OS keychain) so the user can retrieve them later from the Artifacts tab instead of scrolling back through chat. ALWAYS call this once, right after you've created/secured a database and verified it works — in ADDITION to (never instead of) including the credentials in your final summary. Only for real databases/caches (Postgres, MySQL/MariaDB, Redis, MongoDB) — never for OS user accounts or SSH.",
+        "Persist a database's connection details (encrypted, via the OS keychain) so the user can retrieve them later from the Artifacts tab instead of scrolling back through chat. ALWAYS call this once, right after you've created/secured a database and verified it works — in ADDITION to (never instead of) including the credentials in your final summary. Only for real databases/caches (Postgres, MySQL, MariaDB, Redis, MongoDB) — never for OS user accounts or SSH.",
       inputSchema: z.object({
         serverId: z.string(),
         engine: z
-          .enum(['postgresql', 'mysql', 'redis', 'mongodb'])
+          .enum(['postgresql', 'mysql', 'mariadb', 'redis', 'mongodb'])
           .describe('The database engine you configured.'),
         host: z
           .string()
@@ -407,7 +407,7 @@ export function buildTools(ctx: AgentToolContext) {
 
     setupDeployNotifications: tool({
       description:
-        'Install the EASY-HOST deploy-notification helper (/usr/local/bin/easyhost-notify) on a server. Call this once while setting up any automated deployment (e.g. GitHub auto-deploy). The helper records deploy events to /var/log/easyhost/deploy-events.jsonl (shown in the app\'s Deploys tab) and, when the user has connected Telegram in Settings → Alerts, also sends them a Telegram message on deploy success/failure — the bot token is provisioned by the app itself to a root-only file and never passes through you. After calling it, make the deploy script report transitions: /usr/local/bin/easyhost-notify "<app>" ok|failed|rollback "<short message>". If the result has telegramConfigured=false, deploy history still works — tell the user to connect Telegram under Settings → Alerts to also get push notifications.',
+        'Install the Tevada DevOps deploy-notification helper (/usr/local/bin/easyhost-notify) on a server. Call this once while setting up any automated deployment (e.g. GitHub auto-deploy). The helper records deploy events to /var/log/easyhost/deploy-events.jsonl (shown in the app\'s Deploys tab) and, when the user has connected Telegram in Settings → Alerts, also sends them a Telegram message on deploy success/failure — the bot token is provisioned by the app itself to a root-only file and never passes through you. After calling it, make the deploy script report transitions: /usr/local/bin/easyhost-notify "<app>" ok|failed|rollback "<short message>". If the result has telegramConfigured=false, deploy history still works — tell the user to connect Telegram under Settings → Alerts to also get push notifications.',
       inputSchema: z.object({
         serverId: z.string().describe('The server the deployment runs on.'),
       }),
@@ -415,6 +415,35 @@ export function buildTools(ctx: AgentToolContext) {
         const conn = await ctx.connect(serverId);
         if (!conn.ok) return { ok: false, error: conn.error ?? 'connect failed' };
         return ctx.setupDeployNotifications(serverId);
+      },
+    }),
+
+    updateTodos: tool({
+      description:
+        "Maintain a visible task checklist for a multi-step job — the user watches it to see what is done and what is left. Call this at the START of any task that takes more than ~3 steps (a deploy, a security audit, hardening, a migration) to lay out the plan, then call it again EVERY time a step's status changes. Rules: pass the ENTIRE list every time (it replaces the previous one); keep EXACTLY ONE item 'in_progress' at a time; mark an item 'completed' the moment it's done before starting the next; keep item text short and action-oriented (\"Install nginx\", \"Configure TLS\"). Skip this tool for simple one-or-two-step requests — a checklist there is just noise.",
+      inputSchema: z.object({
+        todos: z
+          .array(
+            z.object({
+              text: z
+                .string()
+                .describe('Short imperative task label, e.g. "Install Docker".'),
+              status: z
+                .enum(['pending', 'in_progress', 'completed'])
+                .describe(
+                  "'in_progress' for the one step you're doing now, 'completed' when done, 'pending' otherwise.",
+                ),
+            }),
+          )
+          .max(40)
+          .describe('The complete, ordered task list — replaces the previous one.'),
+      }),
+      execute: async ({ todos }) => {
+        // Drives the transcript's todo card; no tool-start/tool-end so it never
+        // shows up as a generic command row.
+        ctx.emit({ type: 'todos', todos });
+        const completed = todos.filter((t) => t.status === 'completed').length;
+        return { ok: true, total: todos.length, completed };
       },
     }),
 

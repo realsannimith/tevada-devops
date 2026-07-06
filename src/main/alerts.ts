@@ -46,10 +46,19 @@ export type RuleState = {
   successes: number;
   triggered: boolean;
   lastReminderAt: number;
+  /** When the current incident first fired (ms epoch, 0 = never) — lets
+   *  reminders say "firing for 30m" and resolves say "recovered after 12m". */
+  firedAt: number;
 };
 
 export function freshRuleState(): RuleState {
-  return { failures: 0, successes: 0, triggered: false, lastReminderAt: 0 };
+  return {
+    failures: 0,
+    successes: 0,
+    triggered: false,
+    lastReminderAt: 0,
+    firedAt: 0,
+  };
 }
 
 /** What a single check advanced the rule to — the only actions that notify. */
@@ -93,6 +102,7 @@ export function stepRule(
   if (!sendInitial && !sendReminder) return 'none';
   state.triggered = true;
   state.lastReminderAt = now;
+  if (sendInitial) state.firedAt = now;
   return sendInitial ? 'fire' : 'remind';
 }
 
@@ -194,7 +204,7 @@ export class AlertEngine {
         serverName: name,
         metric: 'reachability',
         healthy: up,
-        detail: up ? 'Host is reachable' : 'Host is unreachable (SSH down)',
+        detail: up ? 'SSH connection restored' : 'SSH connection failed',
       });
     }
 
@@ -283,13 +293,13 @@ export class AlertEngine {
     this.states.set(key, st);
     switch (action) {
       case 'fire':
-        this.notify(config, input, 'firing', false);
+        this.notify(config, input, 'firing', false, st.firedAt);
         break;
       case 'remind':
-        this.notify(config, input, 'firing', true);
+        this.notify(config, input, 'firing', true, st.firedAt);
         break;
       case 'resolve':
-        this.notify(config, input, 'resolved', false);
+        this.notify(config, input, 'resolved', false, st.firedAt);
         break;
       default:
         break;
@@ -301,6 +311,7 @@ export class AlertEngine {
     input: EvalInput,
     state: 'firing' | 'resolved',
     reminder: boolean,
+    firedAt: number,
   ): void {
     const event: AlertEvent = {
       serverId: input.serverId,
@@ -317,7 +328,7 @@ export class AlertEngine {
 
     const token = this.deps.getToken();
     if (!token || !config.chatId) return;
-    const html = renderAlertHtml(event);
+    const html = renderAlertHtml(event, firedAt);
     void sendMessage(token, config.chatId, html).catch((err) => {
       console.error('[alerts] failed to send Telegram message:', err);
     });
@@ -338,28 +349,68 @@ function worstDisk(stats: ServerStats): { mount: string; pct: number } | null {
   return worst;
 }
 
-const METRIC_LABEL: Record<AlertMetric, string> = {
-  reachability: 'Reachability',
-  cpu: 'CPU',
-  memory: 'Memory',
-  disk: 'Disk',
-  load: 'Load average',
+/** Render-style event names — what happened, in plain words, per metric. */
+const METRIC_TITLES: Record<AlertMetric, { firing: string; resolved: string }> = {
+  reachability: { firing: 'Server unreachable', resolved: 'Server back online' },
+  cpu: { firing: 'High CPU usage', resolved: 'CPU back to normal' },
+  memory: { firing: 'High memory usage', resolved: 'Memory back to normal' },
+  disk: { firing: 'Disk almost full', resolved: 'Disk usage back to normal' },
+  load: { firing: 'High load average', resolved: 'Load back to normal' },
 };
 
-/** Build the HTML message body sent to Telegram. */
-export function renderAlertHtml(event: AlertEvent): string {
-  const icon = event.state === 'resolved' ? '✅' : '🔴';
-  const heading = event.state === 'resolved' ? 'Resolved' : reminderOrTriggered(event);
-  const label = METRIC_LABEL[event.metric];
-  const lines = [
-    `${icon} <b>${escapeHtml(event.serverName)}</b> — ${heading}`,
-    `${escapeHtml(label)}: ${escapeHtml(event.message)}`,
-  ];
-  return lines.join('\n');
+/** "Jul 6, 1:24 AM" — the readable stamp every notification footer carries. */
+export function formatAlertTime(ts: number): string {
+  return new Date(ts).toLocaleString('en-US', {
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    hour12: true,
+  });
 }
 
-function reminderOrTriggered(event: AlertEvent): string {
-  return event.reminder ? 'Still firing' : 'Alert';
+/** Compact incident duration: "45s", "12m", "1h 5m", "2d 3h". */
+export function formatDuration(ms: number): string {
+  const s = Math.max(0, Math.round(ms / 1000));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return m % 60 ? `${h}h ${m % 60}m` : `${h}h`;
+  const d = Math.floor(h / 24);
+  return h % 24 ? `${d}d ${h % 24}h` : `${d}d`;
+}
+
+/**
+ * Build the HTML message sent to Telegram. One standard shape for every
+ * notification (Render.com-style event feed):
+ *
+ *   <icon> <b>Event title</b>          🔴 High memory usage
+ *   <b>subject</b> · detail            E · Memory at 95% (threshold 90%)
+ *   <i>context · readable time</i>     firing for 30m · Jul 6, 1:24 AM
+ */
+export function renderAlertHtml(event: AlertEvent, firedAt = 0): string {
+  const titles = METRIC_TITLES[event.metric];
+  const icon = event.state === 'resolved' ? '✅' : '🔴';
+  const title = event.state === 'resolved' ? titles.resolved : titles.firing;
+
+  const footer: string[] = [];
+  if (event.reminder) {
+    footer.push(
+      firedAt > 0
+        ? `still firing · ${formatDuration(event.ts - firedAt)} so far`
+        : 'still firing',
+    );
+  } else if (event.state === 'resolved' && firedAt > 0) {
+    footer.push(`recovered after ${formatDuration(event.ts - firedAt)}`);
+  }
+  footer.push(formatAlertTime(event.ts));
+
+  return [
+    `${icon} <b>${escapeHtml(title)}</b>`,
+    `<b>${escapeHtml(event.serverName)}</b> · ${escapeHtml(event.message)}`,
+    `<i>${escapeHtml(footer.join(' · '))}</i>`,
+  ].join('\n');
 }
 
 // ---------------------------------------------------------------------------
@@ -419,10 +470,15 @@ export async function sendTest(): Promise<TelegramTestResult> {
   if (!token) return { ok: false, error: 'Connect a bot token first.' };
   if (!chatId) return { ok: false, error: 'Pick a chat first.' };
   try {
+    // Same 3-line shape as real alerts, so the test previews the actual style.
     await sendMessage(
       token,
       chatId,
-      '✅ <b>EASY-HOST</b> — test alert\nTelegram alerts are configured correctly.',
+      [
+        '🔔 <b>Test notification</b>',
+        '<b>Tevada DevOps</b> · Telegram alerts are configured correctly.',
+        `<i>${escapeHtml(formatAlertTime(Date.now()))}</i>`,
+      ].join('\n'),
     );
     return { ok: true };
   } catch (err) {

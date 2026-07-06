@@ -53,8 +53,8 @@ describe('runtimePaths', () => {
   });
 
   it('resolves app identity for dev vs prod', () => {
-    expect(resolveAppDisplayName(true)).toBe('EASY-HOST (Dev)');
-    expect(resolveAppDisplayName(false)).toBe('EASY-HOST');
+    expect(resolveAppDisplayName(true)).toBe('Tevada DevOps (Dev)');
+    expect(resolveAppDisplayName(false)).toBe('Tevada DevOps');
     expect(resolveAppUserModelId(true)).toBe('com.sannimith.easyhost.dev');
     expect(resolveAppUserModelId(false)).toBe('com.sannimith.easyhost');
   });

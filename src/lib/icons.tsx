@@ -4,6 +4,9 @@ import {
   IconArrowLeft,
   IconChartBar,
   IconCheck,
+  IconCircle,
+  IconCircleCheckFilled,
+  IconChecklist,
   IconChevronRight,
   IconServer,
   IconCopy,
@@ -68,6 +71,9 @@ export const ArrowLeftIcon = adaptIcon(IconArrowLeft);
 export const BotIcon = adaptIcon(IconRobot);
 export const ChartBarIcon = adaptIcon(IconChartBar);
 export const CheckIcon = adaptIcon(IconCheck);
+export const ChecklistIcon = adaptIcon(IconChecklist);
+export const CircleIcon = adaptIcon(IconCircle);
+export const CircleCheckFilledIcon = adaptIcon(IconCircleCheckFilled);
 export const ChevronRightIcon = adaptIcon(IconChevronRight);
 export const ServerIcon = adaptIcon(IconServer);
 export const ClockIcon = centralIconWrapper('clock');

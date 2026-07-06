@@ -12,6 +12,18 @@ import { fileURLToPath } from 'node:url';
 const rootDir = path.dirname(fileURLToPath(import.meta.url));
 const iconPath = path.join(rootDir, 'resources', 'icon');
 
+const easyHostDevElectronPlugin = {
+  name: 'easy-host-dev-electron',
+  __isElectronForgePlugin: true as const,
+  init() {},
+  getHooks() {
+    return {};
+  },
+  async startLogic() {
+    return process.env.EASYHOST_ELECTRON_EXEC_PATH || false;
+  },
+};
+
 const config: ForgeConfig = {
   packagerConfig: {
     asar: true,
@@ -26,6 +38,7 @@ const config: ForgeConfig = {
     new MakerDeb({}),
   ],
   plugins: [
+    easyHostDevElectronPlugin,
     new VitePlugin({
       // `build` can specify multiple entry builds, which can be Main process, Preload scripts, Worker process, etc.
       // If you are familiar with Vite configuration, it will look really familiar.

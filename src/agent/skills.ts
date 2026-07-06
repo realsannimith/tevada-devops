@@ -25,6 +25,7 @@ import dockerComposeStack from './skills/docker-compose-stack/SKILL.md?raw';
 import reverseProxyTls from './skills/reverse-proxy-tls/SKILL.md?raw';
 import dockerMaintenance from './skills/docker-maintenance/SKILL.md?raw';
 import serverHardening from './skills/server-hardening/SKILL.md?raw';
+import securityAudit from './skills/security-audit/SKILL.md?raw';
 import troubleshootServer from './skills/troubleshoot-server/SKILL.md?raw';
 import monitoringUptime from './skills/monitoring-uptime/SKILL.md?raw';
 import githubAutoDeploy from './skills/github-auto-deploy/SKILL.md?raw';
@@ -57,6 +58,7 @@ const BUNDLED_RAW = [
   reverseProxyTls,
   dockerMaintenance,
   serverHardening,
+  securityAudit,
   troubleshootServer,
   monitoringUptime,
   githubAutoDeploy,
@@ -115,7 +117,7 @@ export function bundledSkills(): Skill[] {
   return skills;
 }
 
-const USER_SKILLS_README = `# EASY-HOST custom skills
+const USER_SKILLS_README = `# Tevada DevOps custom skills
 
 Drop skills here to teach the agent new procedures (or override a built-in one by
 reusing its name). A skill is a folder with a SKILL.md, or a flat <name>.md file:
@@ -195,7 +197,7 @@ export function skillsPromptSection(skills: Skill[]): string {
     .join('\n');
   return [
     'Skills:',
-    'You have a library of skills — vetted step-by-step procedures for common DevOps jobs. Docker is the standard way EASY-HOST deploys and runs software; prefer a Docker-based skill over improvising a native install unless the user explicitly asks otherwise.',
+    'You have a library of skills — vetted step-by-step procedures for common DevOps jobs. Docker is the standard way Tevada DevOps deploys and runs software; prefer a Docker-based skill over improvising a native install unless the user explicitly asks otherwise.',
     "- BEFORE starting any work that matches a skill's description below, call the `skill` tool with its name and follow the loaded instructions. They encode hard-won details (non-interactive flags, security defaults, verification steps, rollback paths) that keep servers safe.",
     '- Skills reference each other; load the referenced skill when you reach that part of the job. Do not load skills irrelevant to the task.',
     '',

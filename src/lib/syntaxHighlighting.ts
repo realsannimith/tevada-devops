@@ -4,7 +4,7 @@
  * Mirrors the shape of FCode's `syntaxHighlighting.ts` (a lazily-created
  * highlighter singleton + an HTML cache), but stands alone: it loads a curated
  * set of languages relevant to a DevOps/SSH agent and two bundled themes that
- * track EASY-HOST's light/dark tokens. Shiki itself is dynamically imported so
+ * track Tevada DevOps's light/dark tokens. Shiki itself is dynamically imported so
  * it is code-split out of the main renderer bundle.
  */
 import type { Highlighter } from 'shiki';

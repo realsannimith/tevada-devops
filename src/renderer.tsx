@@ -11,6 +11,7 @@ import { createRoot } from 'react-dom/client';
 import { ThemeProvider } from 'next-themes';
 import App from './App';
 import { ErrorBoundary } from './components/ErrorBoundary';
+import { Toaster } from './components/ui/sonner';
 
 const root = createRoot(document.getElementById('root')!);
 root.render(
@@ -29,6 +30,7 @@ root.render(
     >
       <ErrorBoundary>
         <App />
+        <Toaster />
       </ErrorBoundary>
     </ThemeProvider>
   </StrictMode>,

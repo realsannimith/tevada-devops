@@ -1,6 +1,6 @@
 {
-  "name": "easy-host",
-  "productName": "easy-host",
+  "name": "tevada-devops",
+  "productName": "Tevada DevOps",
   "version": "1.0.0",
   "description": "AI-powered server management and DevOps automation desktop app",
   "main": ".vite/build/main.js",

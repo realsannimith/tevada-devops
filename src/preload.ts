@@ -12,6 +12,9 @@ import {
   AlertEvent,
   AlertsStatus,
   AppSettings,
+  ArtifactActionRequest,
+  ArtifactLogsRequest,
+  ArtifactLogsResult,
   ArtifactsScanResult,
   ChatHistoryChangedEvent,
   ChatHistoryState,
@@ -170,6 +173,10 @@ const easyhost = {
   artifacts: {
     scan: (serverId: string): Promise<ArtifactsScanResult> =>
       ipcRenderer.invoke(IPC.artifactsScan, { serverId }),
+    action: (req: ArtifactActionRequest): Promise<OkResult> =>
+      ipcRenderer.invoke(IPC.artifactsAction, req),
+    logs: (req: ArtifactLogsRequest): Promise<ArtifactLogsResult> =>
+      ipcRenderer.invoke(IPC.artifactsLogs, req),
   },
 
   deploys: {

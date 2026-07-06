@@ -30,7 +30,7 @@ export function generateKeyPair(comment: string): GeneratedKey {
   const { privateKey } = crypto.generateKeyPairSync('ed25519', {});
   const pkcs8 = privateKey.export({ format: 'pem', type: 'pkcs8' }) as string;
   const key = parsePrivateKey(pkcs8, 'pkcs8');
-  key.comment = comment || 'easy-host';
+  key.comment = comment || 'tevada-devops';
 
   const publicKey = key.toPublic().toString('ssh');
   const privateKeyOpenSSH = key.toString('openssh');

@@ -1,9 +1,11 @@
 /**
- * Runtime path resolution for EASY-HOST.
+ * Runtime path resolution for Tevada DevOps.
  *
  * Mirrors the FCode desktop pattern: a configurable home directory
  * (EASYHOST_HOME, default ~/.easyhost) and a stable Electron userData profile
- * name that separates dev from production builds.
+ * name that separates dev from production builds. NOTE: the env var, home dir
+ * and userData folder names below stay `easyhost` on purpose — they are the
+ * on-disk data location; renaming them would orphan existing user data.
  */
 import * as OS from 'node:os';
 import * as Path from 'node:path';
@@ -62,7 +64,7 @@ export function isDevelopmentRuntime(
 }
 
 export function resolveAppDisplayName(isDevelopment: boolean): string {
-  return isDevelopment ? 'EASY-HOST (Dev)' : 'EASY-HOST';
+  return isDevelopment ? 'Tevada DevOps (Dev)' : 'Tevada DevOps';
 }
 
 export function resolveAppUserModelId(isDevelopment: boolean): string {

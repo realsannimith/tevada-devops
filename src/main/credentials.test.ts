@@ -40,6 +40,15 @@ describe('buildConnectionString', () => {
     ).toBe('mysql://root:secret@10.0.0.5:3306/appdb');
   });
 
+  it('builds a mariadb URI the same way as mysql (wire-compatible)', () => {
+    expect(
+      buildConnectionString(
+        { engine: 'mariadb', host: '10.0.0.5', port: 3306, database: 'appdb', username: 'appuser' },
+        'secret',
+      ),
+    ).toBe('mysql://appuser:secret@10.0.0.5:3306/appdb');
+  });
+
   it('builds a mongodb URI', () => {
     expect(
       buildConnectionString(
@@ -76,13 +85,23 @@ describe('parseContainerCredentialGuess', () => {
   it('reads a mariadb container env, preferring the app user over root', () => {
     expect(
       parseContainerCredentialGuess(
-        'mysql',
+        'mariadb',
         [
           'MARIADB_ROOT_PASSWORD=rootpw',
           'MARIADB_PASSWORD=apppw',
           'MARIADB_USER=appuser',
           'MARIADB_DATABASE=appdb',
         ],
+        [],
+      ),
+    ).toEqual({ password: 'apppw', username: 'appuser', database: 'appdb' });
+  });
+
+  it('reads a mysql container env', () => {
+    expect(
+      parseContainerCredentialGuess(
+        'mysql',
+        ['MYSQL_ROOT_PASSWORD=rootpw', 'MYSQL_USER=appuser', 'MYSQL_PASSWORD=apppw', 'MYSQL_DATABASE=appdb'],
         [],
       ),
     ).toEqual({ password: 'apppw', username: 'appuser', database: 'appdb' });

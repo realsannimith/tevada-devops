@@ -108,6 +108,14 @@ describe('NOTIFY_HELPER_SCRIPT', () => {
     expect(s).toContain(">> /var/log/easyhost/deploy-events.jsonl");
     expect(s).toContain('. /etc/easyhost/telegram.env');
     expect(s).toContain('case "$STATUS" in ok|failed|rollback|error|test) ;; *) exit 0 ;; esac');
+    // Render-style titles + the standard 3-line message shape.
+    expect(s).toContain('TITLE="Deploy succeeded"');
+    expect(s).toContain('TITLE="Deploy failed"');
+    // Human-readable footer time ("Jul 6, 1:24 PM"); the JSONL keeps date -Is.
+    expect(s).toContain(`WHEN=$(date '+%b %-d, %-I:%M %p' 2>/dev/null || date)`);
+    expect(s).toContain('TS=$(date -Is)');
+    // Empty deploy messages must not leave a dangling "·" separator.
+    expect(s).toContain('[ -n "$MSG" ] && BODY="$BODY · $(hesc "$MSG")"');
     // JSON escaping in the shell esc(): backslash doubling then quote escaping.
     expect(s).toContain(`sed -e 's/\\\\/\\\\\\\\/g' -e 's/"/\\\\"/g'`);
     expect(s).toContain('https://api.telegram.org/bot${EASYHOST_TG_TOKEN}/sendMessage');

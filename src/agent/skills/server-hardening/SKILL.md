@@ -8,7 +8,13 @@ description: Secure a Linux server — firewall (ufw/firewalld), SSH hardening, 
 Goal: firewall on with only needed ports, SSH resistant to brute force, security
 patches automatic. Work in this order — each step protects the next.
 
-**Lockout rule (read first):** EASY-HOST itself is connected over SSH right now.
+**This skill APPLIES fixes.** To first *find* what's wrong (weak points, signs
+of compromise) without changing anything, use `security-audit` — it's the
+read-only detection pass. If the user asked to "check if my server is safe / has
+been hacked", start with `security-audit` and only come here once they approve
+the fixes it recommends.
+
+**Lockout rule (read first):** Tevada DevOps itself is connected over SSH right now.
 Never disable the auth method or port this session is using. Before touching sshd
 config, check how the current connection authenticates (password vs key) — if the
 saved profile uses a password, do NOT disable password auth; offer to set up key

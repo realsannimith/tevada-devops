@@ -32,6 +32,17 @@ export type WizardLaunchDetail = {
   values: Record<string, string>;
 };
 
+/** Dispatched to open the chat with a drafted message ready to send — e.g. the
+ *  Artifacts tab's "Review with agent" on the exposed-ports strip. Always lands
+ *  in a fresh chat session so it can't tack onto an unrelated conversation. */
+export const CHAT_PREFILL_EVENT = 'easyhost:chat-prefill';
+
+export type ChatPrefillDetail = {
+  message: string;
+  /** Scopes the run's SSH tools to one server (null/absent = all servers). */
+  serverId?: string | null;
+};
+
 export type ChatHistorySummary = {
   id: string;
   kind: ChatSessionKind;

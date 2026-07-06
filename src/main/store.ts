@@ -256,6 +256,20 @@ function isChatHistoryItem(value: unknown): value is ChatHistoryItem {
       (item.status === 'running' || item.status === 'done')
     );
   }
+  if (item.kind === 'todos') {
+    return (
+      typeof item.id === 'string' &&
+      Array.isArray(item.todos) &&
+      item.todos.every(
+        (t) =>
+          t &&
+          typeof t.text === 'string' &&
+          (t.status === 'pending' ||
+            t.status === 'in_progress' ||
+            t.status === 'completed'),
+      )
+    );
+  }
   return false;
 }
 

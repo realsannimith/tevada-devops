@@ -138,3 +138,48 @@ describe('deleteChatSession', () => {
     expect(findSession('a')).toBeUndefined();
   });
 });
+
+describe('upsertChatSession persists todo-list items', () => {
+  it('keeps a todos item through a save/load round-trip', () => {
+    upsertChatSession(
+      session({
+        id: 'a',
+        items: [
+          { kind: 'text', id: 'u1', role: 'user', content: 'deploy it' },
+          {
+            kind: 'todos',
+            id: 'todo_1',
+            todos: [
+              { text: 'Install Docker', status: 'completed' },
+              { text: 'Run the container', status: 'in_progress' },
+              { text: 'Verify it responds', status: 'pending' },
+            ],
+          },
+        ],
+      }),
+    );
+    const saved = findSession('a');
+    expect(saved?.items.map((i) => i.kind)).toEqual(['text', 'todos']);
+    const todosItem = saved?.items.find((i) => i.kind === 'todos');
+    expect(todosItem && todosItem.kind === 'todos' && todosItem.todos).toHaveLength(3);
+  });
+
+  it('drops a malformed todos item (bad status) but keeps the valid ones', () => {
+    upsertChatSession(
+      session({
+        id: 'a',
+        items: [
+          {
+            kind: 'todos',
+            id: 'good',
+            todos: [{ text: 'ok', status: 'pending' }],
+          },
+          // @ts-expect-error — intentionally invalid status, must be rejected
+          { kind: 'todos', id: 'bad', todos: [{ text: 'x', status: 'huh' }] },
+        ],
+      }),
+    );
+    const saved = findSession('a');
+    expect(saved?.items.map((i) => i.kind)).toEqual(['todos']);
+  });
+});

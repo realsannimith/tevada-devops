@@ -11,6 +11,14 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { ServerSecret } from '../shared/ipc-types';
 
+const SAFE_STORAGE_APP_NAME_FALLBACKS = [
+  'Electron',
+  'Tevada DevOps (Dev)',
+  'Tevada DevOps',
+  'easy-host',
+  'tevada-devops',
+];
+
 function secretsDir(): string {
   const dir = path.join(app.getPath('userData'), 'secrets');
   fs.mkdirSync(dir, { recursive: true });
@@ -30,6 +38,37 @@ export function secretsAvailable(): boolean {
   }
 }
 
+function safeStorageAppNames(): string[] {
+  return Array.from(new Set([app.getName(), ...SAFE_STORAGE_APP_NAME_FALLBACKS]));
+}
+
+function withAppName<T>(name: string, fn: () => T): T {
+  const currentName = app.getName();
+  if (currentName === name) return fn();
+  try {
+    app.setName(name);
+    return fn();
+  } finally {
+    app.setName(currentName);
+  }
+}
+
+function encryptString(value: string): Buffer {
+  return safeStorage.encryptString(value);
+}
+
+function decryptString(buf: Buffer): string {
+  let lastError: unknown;
+  for (const name of safeStorageAppNames()) {
+    try {
+      return withAppName(name, () => safeStorage.decryptString(buf));
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError;
+}
+
 export function saveSecret(serverId: string, secret: ServerSecret): void {
   if (!secretsAvailable()) {
     throw new Error(
@@ -37,7 +76,7 @@ export function saveSecret(serverId: string, secret: ServerSecret): void {
         'On Linux, ensure a keyring (gnome-keyring / kwallet) is running.',
     );
   }
-  const encrypted = safeStorage.encryptString(JSON.stringify(secret));
+  const encrypted = encryptString(JSON.stringify(secret));
   const tmp = `${secretPath(serverId)}.tmp`;
   fs.writeFileSync(tmp, encrypted);
   fs.renameSync(tmp, secretPath(serverId));
@@ -46,9 +85,13 @@ export function saveSecret(serverId: string, secret: ServerSecret): void {
 export function loadSecret(serverId: string): ServerSecret | undefined {
   try {
     const buf = fs.readFileSync(secretPath(serverId));
-    const json = safeStorage.decryptString(buf);
+    const json = decryptString(buf);
     return JSON.parse(json) as ServerSecret;
-  } catch {
+  } catch (error) {
+    console.warn('[secrets] failed to decrypt server secret', {
+      serverId,
+      error: error instanceof Error ? error.message : String(error),
+    });
     return undefined;
   }
 }
@@ -70,7 +113,7 @@ export function saveRawSecret(id: string, value: string): void {
         'On Linux, ensure a keyring (gnome-keyring / kwallet) is running.',
     );
   }
-  const encrypted = safeStorage.encryptString(value);
+  const encrypted = encryptString(value);
   const tmp = `${secretPath(id)}.tmp`;
   fs.writeFileSync(tmp, encrypted);
   fs.renameSync(tmp, secretPath(id));
@@ -78,8 +121,12 @@ export function saveRawSecret(id: string, value: string): void {
 
 export function loadRawSecret(id: string): string | undefined {
   try {
-    return safeStorage.decryptString(fs.readFileSync(secretPath(id)));
-  } catch {
+    return decryptString(fs.readFileSync(secretPath(id)));
+  } catch (error) {
+    console.warn('[secrets] failed to decrypt raw secret', {
+      id,
+      error: error instanceof Error ? error.message : String(error),
+    });
     return undefined;
   }
 }

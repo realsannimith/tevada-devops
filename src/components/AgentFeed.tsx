@@ -16,13 +16,21 @@ import {
   USER_MESSAGE_BUBBLE_RADIUS_CLASS_NAME,
   USER_MESSAGE_BUBBLE_SHELL_CHROME_CLASS_NAME,
 } from '@/components/chat/chatTypography';
-import { ChevronRightIcon, Loader2Icon, TerminalIcon } from '@/lib/icons';
+import {
+  ChecklistIcon,
+  ChevronRightIcon,
+  CircleCheckFilledIcon,
+  CircleIcon,
+  Loader2Icon,
+  TerminalIcon,
+} from '@/lib/icons';
 import { cn } from '@/lib/utils';
 import type {
   FeedItem,
   PendingApproval,
   ToolFeedItem,
 } from '@/hooks/useAgentRun';
+import type { ChatTodoHistoryItem } from '@/shared/ipc-types';
 
 export function AgentFeed({
   feed,
@@ -97,6 +105,8 @@ export function AgentFeed({
                 </div>
               </div>
             )
+          ) : item.kind === 'todos' ? (
+            <TodoCard key={item.id} item={item} />
           ) : (
             <ToolCard key={item.toolCallId} item={item} />
           ),
@@ -143,6 +153,63 @@ export function AgentFeed({
         </AlertDialogContent>
       </AlertDialog>
     </>
+  );
+}
+
+/**
+ * The agent's task checklist — one evolving card per session (updateTodos
+ * replaces the list in place). Renders like Claude Code / Cursor's todo panel:
+ * a titled list with a checkbox glyph per row that ticks off as work completes.
+ * No bare status dots (product decision): pending is a hollow circle
+ * (checkbox affordance), in-progress a spinner, completed a filled check.
+ */
+function TodoCard({ item }: { item: ChatTodoHistoryItem }) {
+  const todos = item.todos;
+  const done = todos.filter((t) => t.status === 'completed').length;
+  const allDone = todos.length > 0 && done === todos.length;
+
+  return (
+    <div className="surface-panel min-w-0 overflow-hidden px-3 py-2.5">
+      <div className="mb-2 flex items-center gap-2">
+        <ChecklistIcon aria-hidden className="size-4 shrink-0 text-muted-foreground" />
+        <span className="text-xs font-medium text-ink">Task list</span>
+        <span className="ml-auto shrink-0 tabular-nums text-[11px] text-muted-foreground/70">
+          {done}/{todos.length}
+        </span>
+      </div>
+      <ol className="space-y-1">
+        {todos.map((todo, i) => (
+          <li key={i} className="flex items-start gap-2">
+            <span className="mt-0.5 flex size-4 shrink-0 items-center justify-center">
+              {todo.status === 'completed' ? (
+                <CircleCheckFilledIcon className="size-4 text-success" />
+              ) : todo.status === 'in_progress' ? (
+                <Loader2Icon className="size-3.5 animate-spin text-skill" />
+              ) : (
+                <CircleIcon className="size-3.5 text-muted-foreground/40" />
+              )}
+            </span>
+            <span
+              className={cn(
+                'min-w-0 flex-1 text-xs leading-5',
+                todo.status === 'completed'
+                  ? 'text-muted-foreground/60 line-through'
+                  : todo.status === 'in_progress'
+                    ? 'font-medium text-ink'
+                    : 'text-muted-foreground',
+              )}
+            >
+              {todo.text}
+            </span>
+          </li>
+        ))}
+      </ol>
+      {allDone && (
+        <p className="mt-2 text-[11px] font-medium text-success">
+          All tasks complete
+        </p>
+      )}
+    </div>
   );
 }
 

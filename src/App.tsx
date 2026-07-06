@@ -30,8 +30,31 @@ export type View =
   | { kind: 'settings' };
 
 function Shell() {
+  const { servers } = useServers();
   const [view, setView] = useState<View>({ kind: 'chat' });
   const [addOpen, setAddOpen] = useState(false);
+  const [editingServerId, setEditingServerId] = useState<string | null>(null);
+  const editingServer = editingServerId
+    ? servers.find((server) => server.id === editingServerId)
+    : null;
+  const serverDialogOpen = addOpen || Boolean(editingServer);
+
+  const openAddServer = () => {
+    setEditingServerId(null);
+    setAddOpen(true);
+  };
+
+  const openEditServer = (serverId: string) => {
+    setAddOpen(false);
+    setEditingServerId(serverId);
+    setView({ kind: 'server', serverId, tab: 'terminal' });
+  };
+
+  const setServerDialogOpen = (open: boolean) => {
+    if (open) return;
+    setAddOpen(false);
+    setEditingServerId(null);
+  };
 
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-background text-foreground">
@@ -41,7 +64,8 @@ function Shell() {
       <ServerSidebar
         view={view}
         onNavigate={setView}
-        onAddServer={() => setAddOpen(true)}
+        onAddServer={openAddServer}
+        onEditServer={openEditServer}
         onOpenSettings={() => setView({ kind: 'settings' })}
       />
 
@@ -60,13 +84,21 @@ function Shell() {
             <WizardsView />
           </div>
           {view.kind === 'server' && (
-            <ServerPane view={view} onNavigate={setView} />
+            <ServerPane
+              view={view}
+              onNavigate={setView}
+              onEditServer={openEditServer}
+            />
           )}
           {view.kind === 'settings' && <SettingsView />}
         </div>
       </main>
 
-      <ServerFormDialog open={addOpen} onOpenChange={setAddOpen} />
+      <ServerFormDialog
+        open={serverDialogOpen}
+        onOpenChange={setServerDialogOpen}
+        server={editingServer}
+      />
     </div>
   );
 }
@@ -74,11 +106,13 @@ function Shell() {
 function ServerPane({
   view,
   onNavigate,
+  onEditServer,
 }: {
   view: Extract<View, { kind: 'server' }>;
   onNavigate: (v: View) => void;
+  onEditServer: (serverId: string) => void;
 }) {
-  const { servers, statusOf, connect, disconnect } = useServers();
+  const { servers, statusOf, errorOf, connect, disconnect } = useServers();
   const server = servers.find((s) => s.id === view.serverId);
   if (!server) {
     return (
@@ -88,6 +122,7 @@ function ServerPane({
     );
   }
   const status = statusOf(server.id);
+  const error = errorOf(server.id);
   const connected = status === 'connected';
 
   return (
@@ -104,6 +139,20 @@ function ServerPane({
             <p className="font-mono text-[11px] text-muted-foreground">
               {server.username}@{server.host}:{server.port}
             </p>
+            {status === 'error' && error && (
+              <div className="mt-1 flex max-w-xl flex-wrap items-center gap-2">
+                <p className="text-[11px] leading-snug text-destructive">
+                  {error}
+                </p>
+                <Button
+                  variant="outline"
+                  size="xs"
+                  onClick={() => onEditServer(server.id)}
+                >
+                  Update credentials
+                </Button>
+              </div>
+            )}
           </div>
         </div>
         <div className="flex items-center gap-2.5">

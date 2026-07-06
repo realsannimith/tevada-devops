@@ -10,6 +10,7 @@ import type {
   ChatHistoryItem,
   ChatTextHistoryItem,
   ChatToolHistoryItem,
+  TodoItem,
 } from '@/shared/ipc-types';
 
 export type ToolFeedItem = ChatToolHistoryItem;
@@ -112,6 +113,10 @@ export function useAgentRun() {
               : it,
           ),
         );
+        break;
+      case 'todos':
+        assistantIdRef.current = null; // next text starts a fresh bubble
+        setFeed((f) => applyTodos(f, event.todos));
         break;
       case 'usage':
         setTokens(event.totalTokens);
@@ -225,6 +230,25 @@ export function useAgentRun() {
     clear,
     replaceFeed,
   };
+}
+
+/**
+ * Fold a `todos` event into the feed: the agent keeps ONE evolving checklist,
+ * so update the existing todos card in place (preserving its position + id) and
+ * only append a fresh one the first time. Shared with chatRunManager so
+ * foreground and background runs reduce identically.
+ */
+export function applyTodos(feed: FeedItem[], todos: TodoItem[]): FeedItem[] {
+  const idx = feed.findIndex((it) => it.kind === 'todos');
+  if (idx === -1) {
+    return [
+      ...feed,
+      { kind: 'todos', id: `todo_${Date.now()}`, todos },
+    ];
+  }
+  const copy = feed.slice();
+  copy[idx] = { ...(copy[idx] as Extract<FeedItem, { kind: 'todos' }>), todos };
+  return copy;
 }
 
 /** Render a tool call's raw result object into the transcript's output text.

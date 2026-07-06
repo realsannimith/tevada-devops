@@ -1,6 +1,6 @@
 // Load environment variables from .env FIRST, before any module that reads them.
 import 'dotenv/config';
-import { app, BrowserWindow } from 'electron';
+import { app, BrowserWindow, shell } from 'electron';
 import path from 'node:path';
 import started from 'electron-squirrel-startup';
 import { registerIpc } from './main/ipc';
@@ -43,6 +43,12 @@ app.setPath(
   }),
 );
 
+// Set the app name synchronously at the top level — BEFORE app.whenReady() —
+// so macOS uses it for the dock tooltip and menu bar instead of the default
+// "Electron". Called again after ready (below) as belt-and-suspenders, exactly
+// like FCode desktop.
+configureAppIdentity();
+
 let mainWindow: BrowserWindow | null = null;
 
 function configureAppIdentity(): void {
@@ -81,6 +87,14 @@ const createWindow = () => {
     },
   });
 
+  // Anything the renderer opens in a "new tab" (markdown links in the chat,
+  // "Open website" on an artifact) belongs in the user's real browser — never
+  // in a bare chromeless child window.
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (/^https?:\/\//i.test(url)) void shell.openExternal(url);
+    return { action: 'deny' };
+  });
+
   if (MAIN_WINDOW_VITE_DEV_SERVER_URL) {
     const win = mainWindow;
     void win.loadURL(MAIN_WINDOW_VITE_DEV_SERVER_URL);
@@ -106,7 +120,7 @@ const createWindow = () => {
 app.whenReady().then(() => {
   configureAppIdentity();
   applyAppIcon();
-  console.info('[easy-host] runtime', {
+  console.info('[tevada-devops] runtime', {
     runtimeHome,
     stateDir,
     userData: app.getPath('userData'),

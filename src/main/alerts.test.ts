@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  formatDuration,
   freshRuleState,
   renderAlertHtml,
   stepRule,
@@ -101,31 +102,69 @@ describe('stepRule — the anti-noise state machine', () => {
 });
 
 describe('renderAlertHtml', () => {
+  const NOON = new Date(2026, 6, 6, 13, 24).getTime(); // Jul 6, 1:24 PM local
+
   const base: AlertEvent = {
     serverId: 's1',
     serverName: 'web-01',
     metric: 'disk',
     state: 'firing',
     message: 'Disk /var at 95% (threshold 90%)',
-    ts: 0,
+    ts: NOON,
   };
 
-  it('formats a firing alert', () => {
+  it('formats a firing alert in the standard 3-line shape', () => {
     const html = renderAlertHtml(base);
-    expect(html).toContain('🔴');
-    expect(html).toContain('<b>web-01</b>');
-    expect(html).toContain('Disk');
+    const lines = html.split('\n');
+    expect(lines).toHaveLength(3);
+    expect(lines[0]).toBe('🔴 <b>Disk almost full</b>');
+    expect(lines[1]).toBe('<b>web-01</b> · Disk /var at 95% (threshold 90%)');
+    expect(lines[2]).toBe('<i>Jul 6, 1:24 PM</i>');
   });
 
-  it('formats a resolved alert', () => {
-    const html = renderAlertHtml({ ...base, state: 'resolved', message: 'Host is reachable', metric: 'reachability' });
-    expect(html).toContain('✅');
-    expect(html).toContain('Resolved');
+  it('formats a resolved alert with the incident duration', () => {
+    const html = renderAlertHtml(
+      {
+        ...base,
+        state: 'resolved',
+        message: 'SSH connection restored',
+        metric: 'reachability',
+      },
+      NOON - 12 * 60_000, // fired 12 minutes earlier
+    );
+    expect(html).toContain('✅ <b>Server back online</b>');
+    expect(html).toContain('<i>recovered after 12m · Jul 6, 1:24 PM</i>');
+  });
+
+  it('formats a reminder with the running duration', () => {
+    const html = renderAlertHtml(
+      { ...base, metric: 'memory', reminder: true },
+      NOON - 90 * 60_000,
+    );
+    expect(html).toContain('🔴 <b>High memory usage</b>');
+    expect(html).toContain('<i>still firing · 1h 30m so far · Jul 6, 1:24 PM</i>');
+  });
+
+  it('uses a readable 12-hour time, never ISO', () => {
+    const html = renderAlertHtml(base);
+    expect(html).toMatch(/\d{1,2}:\d{2} (AM|PM)/);
+    expect(html).not.toMatch(/\d{4}-\d{2}-\d{2}T/);
   });
 
   it('escapes HTML-special characters in the server name', () => {
     const html = renderAlertHtml({ ...base, serverName: 'a<b>&c' });
     expect(html).toContain('a&lt;b&gt;&amp;c');
     expect(html).not.toContain('<b>a<');
+  });
+});
+
+describe('formatDuration', () => {
+  it('picks the two most significant units', () => {
+    expect(formatDuration(45_000)).toBe('45s');
+    expect(formatDuration(12 * 60_000)).toBe('12m');
+    expect(formatDuration(65 * 60_000)).toBe('1h 5m');
+    expect(formatDuration(2 * 3600_000)).toBe('2h');
+    expect(formatDuration(27 * 3600_000)).toBe('1d 3h');
+    expect(formatDuration(-5)).toBe('0s'); // clock skew never renders negative
   });
 });

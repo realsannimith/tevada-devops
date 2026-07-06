@@ -11,6 +11,7 @@
  */
 import { useSyncExternalStore } from 'react';
 import {
+  applyTodos,
   formatAgentToolResult,
   type PendingApproval,
   type RunOutcome,
@@ -147,6 +148,10 @@ function reduce(sessionId: string, event: AgentEvent): void {
             : it,
         ),
       };
+      break;
+    case 'todos':
+      entry.assistantId = null; // next text starts a fresh bubble
+      entry.snapshot = { ...snap, feed: applyTodos(snap.feed, event.todos) };
       break;
     case 'usage':
       entry.snapshot = { ...snap, tokens: event.totalTokens };

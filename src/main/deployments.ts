@@ -51,7 +51,7 @@ const LOG_TAIL_LINES = 200;
  * no bashisms beyond what the deploy scripts already assume.
  */
 export const NOTIFY_HELPER_SCRIPT = `#!/bin/bash
-# Installed by EASY-HOST — deploy event recorder + Telegram notifier.
+# Installed by Tevada DevOps — deploy event recorder + Telegram notifier.
 # Usage: easyhost-notify <app> <status> <message>
 # Appends events to ${DEPLOY_EVENTS_PATH} (shown in the app's
 # Deploys tab) and mirrors ok/failed/rollback/error/test to Telegram when
@@ -72,16 +72,22 @@ case "$STATUS" in ok|failed|rollback|error|test) ;; *) exit 0 ;; esac
 [ -n "\${EASYHOST_TG_TOKEN:-}" ] && [ -n "\${EASYHOST_TG_CHAT_ID:-}" ] || exit 0
 
 case "$STATUS" in
-  ok)       ICON="✅"; TITLE="Deployed" ;;
-  failed)   ICON="🔴"; TITLE="Deploy FAILED" ;;
+  ok)       ICON="✅"; TITLE="Deploy succeeded" ;;
+  failed)   ICON="🔴"; TITLE="Deploy failed" ;;
   rollback) ICON="↩️"; TITLE="Rolled back" ;;
   test)     ICON="🔔"; TITLE="Deploy notifications enabled" ;;
   *)        ICON="⚠️"; TITLE="Deploy $STATUS" ;;
 esac
 hesc() { printf '%s' "$1" | sed -e 's/&/\\&amp;/g' -e 's/</\\&lt;/g' -e 's/>/\\&gt;/g'; }
-TEXT="$ICON <b>$(hesc "$APP")</b> — $TITLE
-$(hesc "$MSG")
-<i>$(hostname) · $TS</i>"
+# Same 3-line shape as the app's monitoring alerts (title / subject · detail /
+# muted footer). WHEN is the server's local time, human-readable — the JSONL
+# above keeps the ISO stamp the app parses.
+WHEN=$(date '+%b %-d, %-I:%M %p' 2>/dev/null || date)
+BODY="<b>$(hesc "$APP")</b>"
+[ -n "$MSG" ] && BODY="$BODY · $(hesc "$MSG")"
+TEXT="$ICON <b>$TITLE</b>
+$BODY
+<i>$(hostname) · $WHEN</i>"
 curl -fsS --max-time 10 "https://api.telegram.org/bot\${EASYHOST_TG_TOKEN}/sendMessage" \\
   -d chat_id="\${EASYHOST_TG_CHAT_ID}" \\
   --data-urlencode text="$TEXT" \\

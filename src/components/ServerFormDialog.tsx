@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Copy, Check, KeyRound, Sparkles } from 'lucide-react';
 import {
   Dialog,
@@ -20,7 +20,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
-import type { AuthType, ServerSecret } from '@/shared/ipc-types';
+import type { AuthType, ServerSecret, ServerWithStatus } from '@/shared/ipc-types';
 import { useServers } from '@/hooks/useServers';
 
 // Provider presets: default login user + where to paste the SSH public key.
@@ -75,9 +75,11 @@ type KeyMode = 'generate' | 'paste';
 export function ServerFormDialog({
   open,
   onOpenChange,
+  server,
 }: {
   open: boolean;
   onOpenChange: (v: boolean) => void;
+  server?: ServerWithStatus | null;
 }) {
   const { refresh } = useServers();
   const [provider, setProvider] = useState('digitalocean');
@@ -101,6 +103,31 @@ export function ServerFormDialog({
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
 
   const prov = PROVIDERS[provider];
+  const isEditing = Boolean(server);
+
+  useEffect(() => {
+    if (!open || !server) return;
+    setProvider('other');
+    setName(server.name);
+    setHost(server.host);
+    setPort(String(server.port));
+    setUsername(server.username);
+    setAuthType(server.authType);
+    setPassword('');
+    setKeyMode('paste');
+    setPrivateKey('');
+    setPassphrase('');
+    setGenPublicKey('');
+    setGenKeyRef('');
+    setCopied(false);
+    setMsg({
+      ok: false,
+      text:
+        server.authType === 'password'
+          ? 'Enter the password again to replace the unreadable saved credential.'
+          : 'Paste the private key again to replace the unreadable saved credential.',
+    });
+  }, [open, server]);
 
   function reset() {
     setProvider('digitalocean');
@@ -127,7 +154,7 @@ export function ServerFormDialog({
   async function generate() {
     setGenerating(true);
     const { keyRef, publicKey } = await window.easyhost.keys.generate(
-      name.trim() || host.trim() || 'easy-host',
+      name.trim() || host.trim() || 'tevada-devops',
     );
     setGenKeyRef(keyRef);
     setGenPublicKey(publicKey);
@@ -186,7 +213,11 @@ export function ServerFormDialog({
     if (!valid) return;
     setSaving(true);
     const { profile, secret } = buildPayload();
-    await window.easyhost.servers.add(profile, secret);
+    if (server) {
+      await window.easyhost.servers.update(server.id, profile, secret);
+    } else {
+      await window.easyhost.servers.add(profile, secret);
+    }
     await refresh();
     setSaving(false);
     reset();
@@ -203,10 +234,11 @@ export function ServerFormDialog({
     >
       <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-lg">
         <DialogHeader>
-          <DialogTitle>Add server</DialogTitle>
+          <DialogTitle>{isEditing ? 'Update server credentials' : 'Add server'}</DialogTitle>
           <DialogDescription>
-            No terminal needed. Credentials are encrypted with your OS keychain
-            and never leave this machine.
+            {isEditing
+              ? 'Replace the saved login secret for this server. Credentials stay encrypted on this machine.'
+              : 'No terminal needed. Credentials are encrypted with your OS keychain and never leave this machine.'}
           </DialogDescription>
         </DialogHeader>
 
@@ -389,7 +421,7 @@ export function ServerFormDialog({
             {testing ? 'Testing…' : 'Test connection'}
           </Button>
           <Button onClick={save} disabled={!valid || saving}>
-            {saving ? 'Saving…' : 'Save server'}
+            {saving ? 'Saving…' : isEditing ? 'Update credentials' : 'Save server'}
           </Button>
         </DialogFooter>
       </DialogContent>

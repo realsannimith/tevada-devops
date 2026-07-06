@@ -1,13 +1,13 @@
 # GitHub App setup (for "Connect GitHub" in Settings)
 
-EASY-HOST connects users' GitHub accounts through a **GitHub App**. Compared to
+Tevada DevOps connects users' GitHub accounts through a **GitHub App**. Compared to
 the classic OAuth flow, the user — not the app — decides which repositories are
 reachable: during installation GitHub asks them to grant **All repositories** or
 **Only select repositories**, and they can change that on GitHub at any time.
 The app's tokens can only ever see what was granted.
 
 You register the app **once** as its developer; every user of your build then
-signs in against it. No backend server is required: EASY-HOST uses the OAuth
+signs in against it. No backend server is required: Tevada DevOps uses the OAuth
 **device flow**, which needs only the public client ID (never the client
 secret or private key), including for token refreshes.
 
@@ -18,10 +18,10 @@ GitHub → your profile picture → **Settings** → **Developer settings** →
 
 | Field | Value |
 |---|---|
-| **GitHub App name** | e.g. `EASY-HOST` (globally unique, max 34 chars) |
+| **GitHub App name** | e.g. `Tevada DevOps` (globally unique, max 34 chars) |
 | **Homepage URL** | your project/repo URL |
 | **Callback URL** | leave **empty** — ignored for device flow |
-| **Expire user authorization tokens** | leave **checked** (EASY-HOST auto-refreshes) |
+| **Expire user authorization tokens** | leave **checked** (Tevada DevOps auto-refreshes) |
 | **Request user authorization (OAuth) during installation** | unchecked |
 | **Enable Device Flow** | **check this** — required |
 | **Webhook → Active** | **uncheck** (no webhook needed) |
@@ -38,10 +38,10 @@ Everything else: **No access**.
 
 ### Where can this GitHub App be installed?
 
-- **Any account** — required if you distribute EASY-HOST to other people.
+- **Any account** — required if you distribute Tevada DevOps to other people.
 - **Only on this account** — fine while testing alone.
 
-## 2. Wire it into EASY-HOST
+## 2. Wire it into Tevada DevOps
 
 On the app's settings page (Developer settings → GitHub Apps → your app) copy
 the **Client ID** (starts with `Iv…` — note: *not* the numeric App ID), and note
@@ -51,12 +51,12 @@ In `.env`:
 
 ```
 GITHUB_CLIENT_ID=Iv23xxxxxxxxxxxxxxxx
-GITHUB_APP_SLUG=easy-host
+GITHUB_APP_SLUG=tevada-devops
 ```
 
 The client ID and slug are public values — shipping them inside the packaged
 app is fine. Do **not** put the app's client secret or private key anywhere
-near EASY-HOST; the device flow never needs them.
+near Tevada DevOps; the device flow never needs them.
 
 ## 3. What users experience
 
@@ -75,7 +75,7 @@ near EASY-HOST; the device flow never needs them.
 ## Token lifecycle (handled automatically)
 
 - User access tokens (`ghu_…`) expire after **8 hours**; the refresh token
-  (`ghr_…`) lasts **6 months**. EASY-HOST refreshes transparently before use
+  (`ghr_…`) lasts **6 months**. Tevada DevOps refreshes transparently before use
   and re-pushes the rotated token to every authorized server it can reach —
   plus, before each agent run, to the servers that run targets.
 - If the refresh token itself expires (6 months without use) the Settings

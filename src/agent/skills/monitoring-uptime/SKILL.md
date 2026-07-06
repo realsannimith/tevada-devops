@@ -5,7 +5,7 @@ description: Set up uptime monitoring and alerting with Uptime Kuma (Docker), pl
 
 # Monitoring & uptime alerts
 
-EASY-HOST's Monitoring view already shows live CPU / memory / disk while the app
+Tevada DevOps's Monitoring view already shows live CPU / memory / disk while the app
 is open. What it doesn't do is watch 24/7 and alert. The standard fix is
 **Uptime Kuma** — a self-hosted uptime monitor that runs as a single Docker
 container and can ping sites, ports, and containers, then notify via email,

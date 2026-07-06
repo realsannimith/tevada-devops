@@ -75,7 +75,7 @@ const databaseInputs: PlaybookInput[] = [
     key: 'engine',
     label: 'Database engine',
     type: 'select',
-    options: ['PostgreSQL', 'MySQL/MariaDB', 'Redis', 'MongoDB'],
+    options: ['PostgreSQL', 'MySQL', 'MariaDB', 'Redis', 'MongoDB'],
     required: true,
   },
   {
@@ -109,12 +109,14 @@ const databaseInputs: PlaybookInput[] = [
   },
 ];
 
-/** Internal engine key used by ServerArtifact.engine / DatabaseCredentialMeta.engine. */
-type DbEngineKey = 'postgresql' | 'mysql' | 'redis' | 'mongodb';
+/** Internal engine key used by ServerArtifact.engine / DatabaseCredentialMeta.engine.
+ *  Matches the engine list Dokploy offers for its own database service. */
+type DbEngineKey = 'postgresql' | 'mysql' | 'mariadb' | 'redis' | 'mongodb';
 
 const ENGINE_KEY: Record<string, DbEngineKey> = {
   PostgreSQL: 'postgresql',
-  'MySQL/MariaDB': 'mysql',
+  MySQL: 'mysql',
+  MariaDB: 'mariadb',
   Redis: 'redis',
   MongoDB: 'mongodb',
 };
@@ -122,8 +124,27 @@ const ENGINE_KEY: Record<string, DbEngineKey> = {
 const ENGINE_PORT: Record<DbEngineKey, number> = {
   postgresql: 5432,
   mysql: 3306,
+  mariadb: 3306,
   redis: 6379,
   mongodb: 27017,
+};
+
+/** Official Docker image name to run for each engine. */
+const ENGINE_IMAGE: Record<DbEngineKey, string> = {
+  postgresql: 'postgres',
+  mysql: 'mysql',
+  mariadb: 'mariadb',
+  redis: 'redis',
+  mongodb: 'mongo',
+};
+
+/** Native distro package to install for each engine (non-Docker path). */
+const ENGINE_PACKAGE: Record<DbEngineKey, string> = {
+  postgresql: 'postgresql',
+  mysql: 'mysql-server',
+  mariadb: 'mariadb-server',
+  redis: 'redis-server',
+  mongodb: 'MongoDB from its official repo (not in most distro repos)',
 };
 
 export type DatabaseWizardTarget = {
@@ -162,7 +183,7 @@ const remoteAccessInputs: PlaybookInput[] = [
     key: 'engine',
     label: 'Database engine',
     type: 'select',
-    options: ['PostgreSQL', 'MySQL/MariaDB', 'Redis', 'MongoDB'],
+    options: ['PostgreSQL', 'MySQL', 'MariaDB', 'Redis', 'MongoDB'],
     required: true,
   },
   {
@@ -225,7 +246,7 @@ export const PLAYBOOKS: Playbook[] = [
     id: 'setup-database',
     title: 'Set up a database',
     description:
-      'Install PostgreSQL, MySQL, Redis or MongoDB — secured with a strong password and ready to use in minutes.',
+      'Install PostgreSQL, MySQL, MariaDB, Redis or MongoDB — secured with a strong password and ready to use in minutes.',
     inputs: databaseInputs,
     buildPrompt: (v, serverName) => {
       const engine = v.engine || 'PostgreSQL';
@@ -257,11 +278,11 @@ export const PLAYBOOKS: Playbook[] = [
           ? [
               `1. Check if Docker is installed (docker --version). If not, install it from the distro packages or the official get.docker.com script, then 'systemctl enable --now docker'.`,
               `2. If a container for this engine already exists, report that and stop rather than clobbering it.`,
-              `3. Run the current official image (postgres / mariadb / redis / mongo) with: a named volume for data, --restart unless-stopped, the generated password via the image's env vars${isRedis ? " (for Redis pass '--requirepass <password>' as the command)" : ` and create database "${dbName}" + user "${dbUser}"`}, and the port published as ${remote ? `0.0.0.0:${port}:${port}` : `127.0.0.1:${port}:${port}`}.`,
+              `3. Run the current official ${ENGINE_IMAGE[target.engine]} image with: a named volume for data, --restart unless-stopped, the generated password via the image's env vars${isRedis ? " (for Redis pass '--requirepass <password>' as the command)" : ` and create database "${dbName}" + user "${dbUser}"`}, and the port published as ${remote ? `0.0.0.0:${port}:${port}` : `127.0.0.1:${port}:${port}`}.`,
               `4. Wait until the container is ready (poll with docker exec + the engine's client, e.g. pg_isready / mysqladmin ping / redis-cli ping / mongosh --eval), then run a real test query as the new user.`,
             ].join('\n')
           : [
-              `1. Detect the OS and install the server package (postgresql / mariadb-server / redis-server / MongoDB from its official repo — MongoDB is not in most distro repos).`,
+              `1. Detect the OS and install the server package (${ENGINE_PACKAGE[target.engine]}).`,
               `2. systemctl enable --now the service and confirm it is active.`,
               isRedis
                 ? `3. Set 'requirepass' to the generated password in the Redis config (back it up first) and restart Redis.`

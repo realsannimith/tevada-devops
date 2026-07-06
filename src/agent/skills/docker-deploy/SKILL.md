@@ -1,11 +1,11 @@
 ---
 name: docker-deploy
-description: Deploy or host any single application (Node.js, Python, static site, or a prebuilt image) on a server as a Docker container — the standard EASY-HOST way to run apps. Use whenever the user asks to deploy, host, run, ship, or containerize an app or service, including when Docker is not installed on the server yet.
+description: Deploy or host any single application (Node.js, Python, static site, or a prebuilt image) on a server as a Docker container — the standard Tevada DevOps way to run apps. Use whenever the user asks to deploy, host, run, ship, or containerize an app or service, including when Docker is not installed on the server yet.
 ---
 
 # Deploy an app with Docker
 
-Docker is the standard way to run apps on EASY-HOST servers: it isolates the app from
+Docker is the standard way to run apps on Tevada DevOps servers: it isolates the app from
 the host, makes updates and rollbacks a tag swap, and works identically on every
 distro. Prefer this over a native install unless the user explicitly asks otherwise.
 

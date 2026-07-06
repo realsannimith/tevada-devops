@@ -37,16 +37,23 @@ export function getWindowIconOption(): { icon: string } | Record<string, never> 
 
 export function applyAppIcon(): void {
   if (process.platform === 'darwin' && app.dock) {
-    const icnsPath = resolveIconPath('icns');
-    const pngPath = resolveResourcePath('dock-icon.png') ?? resolveIconPath('png');
-    const iconPath = icnsPath ?? pngPath;
-    if (!iconPath) {
-      return;
-    }
+    // Try each candidate and use the FIRST that nativeImage actually decodes.
+    // Electron's nativeImage can't read every .icns (iconutil-built ones often
+    // come back empty), so a bare `icns ?? png` picks the icns *path*, loads an
+    // empty image, and the dock silently keeps the default Electron icon. The
+    // high-res PNGs decode reliably, so they're the fallback.
+    const candidates = [
+      resolveIconPath('icns'),
+      resolveResourcePath('dock-icon.png'),
+      resolveIconPath('png'),
+    ].filter((p): p is string => !!p);
 
-    const image = nativeImage.createFromPath(iconPath);
-    if (!image.isEmpty()) {
-      app.dock.setIcon(image);
+    for (const candidate of candidates) {
+      const image = nativeImage.createFromPath(candidate);
+      if (!image.isEmpty()) {
+        app.dock.setIcon(image);
+        return;
+      }
     }
   }
 }

@@ -1,4 +1,4 @@
-# EASY-HOST
+# Tevada DevOps
 
 An AI-powered server management desktop app — like Termius, but the AI agent does
 the DevOps work for you. Connect to your Linux servers over SSH, open interactive
@@ -73,7 +73,7 @@ Same pattern as FCode:
 | `EASYHOST_HOME` | `~/.easyhost` | Runtime home (logs/state extensions) |
 | Electron `userData` | `~/Library/Application Support/easyhost-dev` (dev) or `easyhost` (prod) | Server profiles + encrypted credentials |
 
-Dev builds show as **EASY-HOST (Dev)** in the dock/title bar so you don't confuse them with a packaged install.
+Dev builds show as **Tevada DevOps (Dev)** in the dock/title bar so you don't confuse them with a packaged install.
 
 ## Scripts
 

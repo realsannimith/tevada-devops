@@ -11,6 +11,7 @@ import {
   useState,
   type ReactNode,
 } from 'react';
+import { toast } from 'sonner';
 import type { ConnStatus, ServerWithStatus } from '@/shared/ipc-types';
 
 type NewProfile = Omit<ServerWithStatus, 'id' | 'createdAt' | 'status'>;
@@ -18,7 +19,9 @@ type NewProfile = Omit<ServerWithStatus, 'id' | 'createdAt' | 'status'>;
 type ServersCtx = {
   servers: ServerWithStatus[];
   statuses: Record<string, ConnStatus>;
+  errors: Record<string, string>;
   statusOf: (serverId: string) => ConnStatus;
+  errorOf: (serverId: string) => string | undefined;
   refresh: () => Promise<void>;
   connect: (serverId: string) => Promise<{ ok: boolean; error?: string }>;
   disconnect: (serverId: string) => Promise<void>;
@@ -30,6 +33,7 @@ const Ctx = createContext<ServersCtx | null>(null);
 export function ServersProvider({ children }: { children: ReactNode }) {
   const [servers, setServers] = useState<ServerWithStatus[]>([]);
   const [statuses, setStatuses] = useState<Record<string, ConnStatus>>({});
+  const [errors, setErrors] = useState<Record<string, string>>({});
 
   const refresh = useCallback(async () => {
     const list = await window.easyhost.servers.list();
@@ -43,18 +47,46 @@ export function ServersProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     void refresh();
-    const unsub = window.easyhost.ssh.onStatus(({ serverId, status }) => {
+    const unsub = window.easyhost.ssh.onStatus(({ serverId, status, error }) => {
       setStatuses((prev) => ({ ...prev, [serverId]: status }));
+      setErrors((prev) => {
+        if (status !== 'error') {
+          const { [serverId]: _removed, ...rest } = prev;
+          return rest;
+        }
+        return { ...prev, [serverId]: error ?? 'Connection failed.' };
+      });
     });
     return unsub;
   }, [refresh]);
 
-  const connect = useCallback(
-    (serverId: string) => window.easyhost.ssh.connect(serverId),
-    [],
-  );
+  const connect = useCallback(async (serverId: string) => {
+    setErrors((prev) => {
+      const { [serverId]: _removed, ...rest } = prev;
+      return rest;
+    });
+    try {
+      const result = await window.easyhost.ssh.connect(serverId);
+      if (!result.ok) {
+        const error = result.error ?? 'Connection failed.';
+        setErrors((prev) => ({ ...prev, [serverId]: error }));
+        toast.error('Could not connect to server', { description: error });
+      }
+      return result;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setStatuses((prev) => ({ ...prev, [serverId]: 'error' }));
+      setErrors((prev) => ({ ...prev, [serverId]: message }));
+      toast.error('Could not connect to server', { description: message });
+      return { ok: false, error: message };
+    }
+  }, []);
   const disconnect = useCallback(async (serverId: string) => {
     await window.easyhost.ssh.disconnect(serverId);
+    setErrors((prev) => {
+      const { [serverId]: _removed, ...rest } = prev;
+      return rest;
+    });
   }, []);
   const remove = useCallback(
     async (serverId: string) => {
@@ -68,18 +100,24 @@ export function ServersProvider({ children }: { children: ReactNode }) {
     (serverId: string) => statuses[serverId] ?? 'disconnected',
     [statuses],
   );
+  const errorOf = useCallback(
+    (serverId: string) => errors[serverId],
+    [errors],
+  );
 
   const value = useMemo(
     () => ({
       servers,
       statuses,
+      errors,
       statusOf,
+      errorOf,
       refresh,
       connect,
       disconnect,
       remove,
     }),
-    [servers, statuses, statusOf, refresh, connect, disconnect, remove],
+    [servers, statuses, errors, statusOf, errorOf, refresh, connect, disconnect, remove],
   );
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;

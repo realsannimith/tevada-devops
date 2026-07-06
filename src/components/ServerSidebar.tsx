@@ -5,7 +5,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
-import { FCodeLogo } from '@/components/FCodeLogo';
+import appIcon from '@/assets/app-icon.png';
 import { SidebarLeadingIcon } from '@/components/SidebarLeadingIcon';
 import { SidebarGlyph } from '@/components/sidebarGlyphs';
 import { ThemeToggleButton } from '@/components/ThemeToggle';
@@ -55,11 +55,13 @@ export function ServerSidebar({
   view,
   onNavigate,
   onAddServer,
+  onEditServer,
   onOpenSettings,
 }: {
   view: View;
   onNavigate: (v: View) => void;
   onAddServer: () => void;
+  onEditServer: (serverId: string) => void;
   onOpenSettings: () => void;
 }) {
   const { servers, statusOf, connect, disconnect, remove } = useServers();
@@ -178,9 +180,14 @@ export function ServerSidebar({
   return (
     <aside className="glass drag-region flex h-full w-60 shrink-0 flex-col border-r border-sidebar-border text-sidebar-foreground">
       <div className="flex items-center gap-2 px-4 pt-9 pb-3">
-        <FCodeLogo aria-hidden className="size-4 text-ink" />
+        <img
+          src={appIcon}
+          alt=""
+          aria-hidden
+          className="size-5 shrink-0 rounded-[5px]"
+        />
         <span className="text-[13px] font-semibold tracking-[-0.015em] text-ink">
-          EASY-HOST
+          Tevada DevOps
         </span>
       </div>
 
@@ -188,7 +195,7 @@ export function ServerSidebar({
         <NavRow
           active={view.kind === 'chat'}
           icon={<SidebarGlyph icon={ChatBubbleIcon} variant="leading" />}
-          label="AI Agent"
+          label="DevOps Agent"
           running={liveRuns.chat}
           onClick={() => onNavigate({ kind: 'chat' })}
         />
@@ -307,6 +314,11 @@ export function ServerSidebar({
                       Connect
                     </DropdownMenuItem>
                   )}
+                  <DropdownMenuItem
+                    onClick={() => onEditServer(s.id)}
+                  >
+                    Edit server
+                  </DropdownMenuItem>
                   <DropdownMenuItem
                     onClick={() =>
                       onNavigate({

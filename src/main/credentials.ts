@@ -39,6 +39,7 @@ export function buildConnectionString(
     case 'postgresql':
       return `postgres://${meta.username ?? 'postgres'}:${enc}@${meta.host}:${meta.port}/${db}`;
     case 'mysql':
+    case 'mariadb':
       return `mysql://${meta.username ?? 'root'}:${enc}@${meta.host}:${meta.port}/${db}`;
     case 'mongodb':
       return `mongodb://${meta.username ?? 'root'}:${enc}@${meta.host}:${meta.port}/${db}`;
@@ -119,10 +120,10 @@ export function deleteDatabaseCredentialsForServer(serverId: string): void {
 
 // ---------------------------------------------------------------------------
 // Recovery: for a Docker-run database that predates this feature (or that
-// Easy Host set up before this app ever learned to save credentials), the
+// Tevada DevOps set up before this app ever learned to save credentials), the
 // password is still sitting in the container's own config — this is how the
-// official postgres/mariadb/mongo images and the Redis --requirepass flag
-// take it in the first place. Reading it back means the user never has to
+// official postgres/mysql/mariadb/mongo images and the Redis --requirepass
+// flag take it in the first place. Reading it back means the user never has to
 // retype a password they may not even remember.
 // ---------------------------------------------------------------------------
 
@@ -151,7 +152,8 @@ export function parseContainerCredentialGuess(
         database: envValue(env, 'POSTGRES_DB'),
       };
     }
-    case 'mysql': {
+    case 'mysql':
+    case 'mariadb': {
       const password = envValue(
         env,
         'MARIADB_PASSWORD',
@@ -189,7 +191,7 @@ export function parseContainerCredentialGuess(
 /** Reads the credential straight off a still-running Docker container via
  *  `docker inspect`. Returns undefined if the server is disconnected, the
  *  container is gone, or its config doesn't carry a recognizable password
- *  (e.g. it was created outside Easy Host with a custom setup). */
+ *  (e.g. it was created outside Tevada DevOps with a custom setup). */
 export async function recoverContainerCredential(
   cm: ConnectionManager,
   serverId: string,

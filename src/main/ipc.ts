@@ -8,6 +8,8 @@ import {
   AgentStartRequest,
   AlertConfig,
   AppSettings,
+  ArtifactActionRequest,
+  ArtifactLogsRequest,
   ChatSession,
   IPC,
   SaveDatabaseCredentialRequest,
@@ -25,7 +27,11 @@ import { AlertEngine } from './alerts';
 import * as deployments from './deployments';
 import { ConnectionManager } from './connection-manager';
 import { Monitor } from './monitor';
-import { scanArtifacts } from './artifacts';
+import {
+  readArtifactLogs,
+  runArtifactAction,
+  scanArtifacts,
+} from './artifacts';
 import {
   agentModel,
   cancelAgentRun,
@@ -86,10 +92,27 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
   /** Load the stored secret and connect. Shared by ssh:connect and the agent. */
   const connectServer = async (serverId: string) => {
     const profile = store.getServer(serverId);
-    if (!profile) return { ok: false, error: 'Unknown server.' };
+    const fail = (error: string) => {
+      console.warn('[ssh] connect failed', { serverId, error });
+      send(IPC.evtSshStatus, { serverId, status: 'error', error });
+      return { ok: false, error };
+    };
+    if (!profile) return fail('Unknown server.');
     const secret = secrets.loadSecret(serverId);
-    if (!secret) return { ok: false, error: 'No stored credentials.' };
-    return cm.connect(profile, secret);
+    if (!secret) {
+      return fail(
+        'Saved credentials could not be read. Re-enter the password or SSH key for this server.',
+      );
+    }
+    const result = await cm.connect(profile, secret);
+    if (!result.ok) {
+      console.warn('[ssh] connect failed', {
+        serverId,
+        host: profile.host,
+        error: result.error,
+      });
+    }
+    return result;
   };
 
   // Let github.ts re-push rotated GitHub App tokens to authorized servers in
@@ -175,7 +198,7 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
   // --- keys ----------------------------------------------------------------
 
   ipcMain.handle(IPC.keysGenerate, (_e, arg: { comment?: string }) =>
-    generateKeyPair(arg?.comment ?? 'easy-host'),
+    generateKeyPair(arg?.comment ?? 'tevada-devops'),
   );
 
   // --- ssh -----------------------------------------------------------------
@@ -464,6 +487,12 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
 
   ipcMain.handle(IPC.artifactsScan, (_e, arg: { serverId: string }) =>
     scanArtifacts(cm, arg.serverId),
+  );
+  ipcMain.handle(IPC.artifactsAction, (_e, arg: ArtifactActionRequest) =>
+    runArtifactAction(cm, arg.serverId, arg.runtime, arg.name, arg.action),
+  );
+  ipcMain.handle(IPC.artifactsLogs, (_e, arg: ArtifactLogsRequest) =>
+    readArtifactLogs(cm, arg.serverId, arg.runtime, arg.name),
   );
 
   // --- github auto-deploys (Deploys tab) -------------------------------------

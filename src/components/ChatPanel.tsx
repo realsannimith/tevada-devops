@@ -21,10 +21,12 @@ import { useServers } from '@/hooks/useServers';
 import {
   CHAT_HISTORY_UPDATED_EVENT,
   CHAT_NEW_SESSION_EVENT,
+  CHAT_PREFILL_EVENT,
   CHAT_SESSION_SWITCH_EVENT,
   markInterruptedToolsDone,
   newChatSessionId,
   sessionKind,
+  type ChatPrefillDetail,
 } from '@/lib/chatHistory';
 import { chatRunManager, useChatRun } from '@/lib/chatRunManager';
 import type { ChatSession, ChatSessionStatus } from '@/shared/ipc-types';
@@ -41,7 +43,6 @@ const COMPOSER_MAX_HEIGHT_PX = 200;
 
 export function ChatPanel() {
   const { servers } = useServers();
-  const [model, setModel] = useState('');
   const [input, setInput] = useState('');
   const [target, setTarget] = useState<string>(ALL);
   const [historyReady, setHistoryReady] = useState(false);
@@ -75,10 +76,6 @@ export function ChatPanel() {
   const tokens = runState?.tokens ?? 0;
   const error = runState?.error ?? null;
   const approval = runState?.approval ?? null;
-
-  useEffect(() => {
-    window.easyhost.agent.model().then(setModel).catch(() => {});
-  }, []);
 
   /** Swap the composer to a saved session (or a fresh draft). Never touches
    *  other sessions' runs. Returns the now-displayed session id. */
@@ -155,6 +152,23 @@ export function ChatPanel() {
     };
     window.addEventListener(CHAT_NEW_SESSION_EVENT, handleNewChat);
     return () => window.removeEventListener(CHAT_NEW_SESSION_EVENT, handleNewChat);
+  }, []);
+
+  // Other screens draft a message into the composer (e.g. Artifacts' "Review
+  // with agent"). Always a fresh session — the drafted ask shouldn't inherit
+  // an unrelated conversation's context — targeted at the requesting server.
+  useEffect(() => {
+    const handlePrefill = (event: Event) => {
+      const detail = (event as CustomEvent<ChatPrefillDetail>).detail;
+      if (!detail?.message) return;
+      const id = loadSession(null);
+      void window.easyhost.chatHistory.setActive(id);
+      setTarget(detail.serverId ?? ALL);
+      setInput(detail.message);
+      inputRef.current?.focus();
+    };
+    window.addEventListener(CHAT_PREFILL_EVENT, handlePrefill);
+    return () => window.removeEventListener(CHAT_PREFILL_EVENT, handlePrefill);
   }, []);
 
   useEffect(() => {
@@ -270,12 +284,8 @@ export function ChatPanel() {
           </span>
           <div>
             <h1 className="text-sm font-semibold tracking-[-0.015em] text-ink">
-              AI Agent
+              DevOps Agent
             </h1>
-            <p className="text-[11px] text-muted-foreground">
-              Full-auto DevOps ·{' '}
-              <span className="font-mono">{model || 'model'}</span>
-            </p>
           </div>
         </div>
         <div className="flex items-center gap-1">

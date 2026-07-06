@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { parseArtifacts } from './artifacts';
+import {
+  artifactActionCommand,
+  artifactLogsCommand,
+  isSafeUnitName,
+  parseArtifacts,
+} from './artifacts';
 
 const SEP = '===EH-ART===';
 
@@ -10,6 +15,7 @@ const SAMPLE = [
     'cache\tredis:7\tExited (0) 2 hours ago\t',
     'web\tnginx:alpine\tUp 5 minutes\t0.0.0.0:8080->80/tcp, [::]:8080->80/tcp',
     'app-mysql\tmysql:8\tUp 1 day\t0.0.0.0:3306->3306/tcp',
+    'app-mariadb\tmariadb:11\tUp 1 day\t127.0.0.1:3307->3306/tcp',
   ].join('\n'),
   SEP,
   // nginx sites
@@ -79,6 +85,16 @@ describe('parseArtifacts', () => {
     expect(web).toMatchObject({ remoteAccessible: true });
   });
 
+  it('distinguishes MariaDB containers from MySQL ones', () => {
+    const mariadb = artifacts.find((a) => a.name === 'app-mariadb');
+    expect(mariadb).toMatchObject({
+      kind: 'database',
+      engine: 'mariadb',
+      ports: [3307],
+      remoteAccessible: false,
+    });
+  });
+
   it('parses nginx sites with names, ports and doc root / proxy target', () => {
     const site = artifacts.find((a) => a.name === 'example.com');
     expect(site).toMatchObject({
@@ -122,5 +138,47 @@ describe('parseArtifacts', () => {
 
   it('returns an empty inventory for empty probe output', () => {
     expect(parseArtifacts('')).toEqual([]);
+  });
+});
+
+describe('isSafeUnitName', () => {
+  it('accepts real docker container and systemd unit names', () => {
+    expect(isSafeUnitName('fastapi-learn-deploy')).toBe(true);
+    expect(isSafeUnitName('myapp_db.1')).toBe(true);
+    expect(isSafeUnitName('nginx')).toBe(true);
+    // Debian-style instantiated unit (postgresql@14-main.service).
+    expect(isSafeUnitName('postgresql@14-main')).toBe(true);
+  });
+
+  it('rejects anything that could escape the quoted shell word', () => {
+    expect(isSafeUnitName('')).toBe(false);
+    expect(isSafeUnitName("app'; rm -rf /; '")).toBe(false);
+    expect(isSafeUnitName('app name')).toBe(false);
+    expect(isSafeUnitName('app$(id)')).toBe(false);
+    expect(isSafeUnitName('app`id`')).toBe(false);
+    expect(isSafeUnitName('-rm')).toBe(false); // no leading dash/flag injection
+    expect(isSafeUnitName('a'.repeat(129))).toBe(false);
+  });
+});
+
+describe('artifact action/logs commands', () => {
+  // Escaping is pinned: names are single-quoted and validated upstream, and
+  // the string must stay prefix-safe (callers prepend `sudo -n ` verbatim).
+  it('builds docker lifecycle and log commands', () => {
+    expect(artifactActionCommand('container', 'web', 'restart')).toBe(
+      "docker restart 'web' 2>&1",
+    );
+    expect(artifactLogsCommand('container', 'web')).toBe(
+      "docker logs --tail 200 'web' 2>&1",
+    );
+  });
+
+  it('builds systemctl/journalctl commands for services', () => {
+    expect(artifactActionCommand('service', 'nginx', 'stop')).toBe(
+      "systemctl stop 'nginx' 2>&1",
+    );
+    expect(artifactLogsCommand('service', 'nginx')).toBe(
+      "journalctl -u 'nginx' -n 200 --no-pager 2>&1",
+    );
   });
 });

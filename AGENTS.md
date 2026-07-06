@@ -2,7 +2,7 @@
 
 ## Project Snapshot
 
-EASY-HOST is an Electron desktop app for AI-driven server management (SSH terminals,
+Tevada DevOps is an Electron desktop app for AI-driven server management (SSH terminals,
 monitoring, DevOps agent, wizards). Stack: Electron + Vite + React + Tailwind v4 +
 shadcn + Gemini agent loop.
 
@@ -12,7 +12,7 @@ When building or changing UI, match existing surfaces in `ChatPanel.tsx`,
 
 ## UI Design System (Required)
 
-EASY-HOST follows the FCode “quietly-confident native developer tool” look. **Do not
+Tevada DevOps follows the FCode “quietly-confident native developer tool” look. **Do not
 ship generic admin/form UI** (heavy borders, blue primary CTAs, floating input boxes,
 full-strength pane dividers).
 
@@ -111,6 +111,12 @@ The DevOps agent uses the standard Agent Skills pattern (progressive disclosure)
 - Write descriptions with an explicit trigger ("Use when…") — the description is
   the only thing the model sees when deciding to load a skill. Keep bodies
   imperative, explain the why, and end with verify + report steps.
+- Security is a two-skill pair: `security-audit` is the **read-only** detection
+  pass (finds weak points + compromise indicators, changes nothing, reports
+  ranked by severity) and `server-hardening` **applies** the fixes (firewall,
+  SSH, fail2ban, auto-updates). "Is my server safe / has it been hacked?" →
+  audit first, harden only on the user's go-ahead. Any new read-only diagnostic
+  skill must keep that firewall: observe and report, never mutate on a suspicion.
 
 ## Auto-deploy visibility (Deploys tab + Telegram)
 
@@ -145,6 +151,66 @@ server-side contract owned by `src/main/deployments.ts`:
 
 Changing the helper script, event format or registry shape means updating
 `deployments.ts` (+ its tests) AND the github-auto-deploy skill together.
+
+**Telegram message standard** (alerts + deploys share one Render-style shape,
+pinned by alerts.test.ts / deployments.test.ts):
+
+```
+<icon> <b>Event title</b>          🔴 High memory usage   /  ✅ Deploy succeeded
+<b>subject</b> · detail            E · Memory at 95% (threshold 90%)
+<i>context · readable time</i>     recovered after 12m · Jul 6, 1:24 PM
+```
+
+Times are always human-readable 12-hour ("Jul 6, 1:24 PM"), never ISO — the
+JSONL event stream keeps `date -Is` (the app parses it). App-side messages are
+built by `renderAlertHtml` (alerts.ts, with incident duration from
+`RuleState.firedAt`); server-side by the notify helper's `WHEN=$(date '+%b %-d,
+%-I:%M %p' ...)`. Existing servers keep the old helper until the agent re-runs
+`setupDeployNotifications` (install is an overwrite, safe to re-run).
+
+## Agent task list (todo checklist)
+
+The DevOps agent can maintain a live task checklist the user watches — like
+Claude Code / Cursor's todo panel. The `updateTodos` tool (tools.ts) takes the
+full ordered list every call (`{ text, status: pending|in_progress|completed }[]`)
+and emits a `todos` AgentEvent — it does NOT emit tool-start/tool-end, so no
+generic command row appears. The system prompt tells the agent to use it for any
+job over ~3 steps, keeping exactly one item `in_progress`.
+
+Reduction is shared: `applyTodos` (useAgentRun.ts) folds a `todos` event into
+the feed as ONE evolving `ChatTodoHistoryItem` — it updates the existing card in
+place (stable id → stable React key) instead of appending, so boxes tick off
+without spamming the transcript. Used by both the foreground reducer
+(useAgentRun) and background runs (chatRunManager). Rendered by `TodoCard` in
+AgentFeed.tsx (checklist header + N/total counter; completed = filled check +
+strikethrough, in_progress = spinner + bold, pending = hollow circle — no bare
+status dots). Persisted via the `todos` case in store.ts `isChatHistoryItem`
+(add-only validation — forgetting it silently drops the item on save).
+
+## Artifacts tab operations (actions, logs, exposure)
+
+The Artifacts tab is operable, not just an inventory (`ArtifactsView.tsx` +
+`src/main/artifacts.ts`):
+
+- **Row actions** — Start/Stop/Restart on container (`docker`) and service
+  (`systemctl`) rows via `artifacts:action`; icon-only ghost buttons with
+  tooltips (labels crowded names off the row). Runtime is derived from the
+  artifact id prefix (`container:` / `service:`). Names are validated against
+  `isSafeUnitName` (single-quoted in the command; escaping pinned by
+  `artifacts.test.ts`) and execs try plain first, `sudo -n` second — the
+  deployments.ts idiom.
+- **Logs** — `artifacts:logs` tails `docker logs --tail 200` / `journalctl -u`
+  into an expandable per-row panel (same searchable 4s-polling pattern as the
+  Deploys tab's build log). journalctl goes sudo-first: non-root gets an
+  empty-but-exit-0 result.
+- **Exposure strip** — aggregates `remoteAccessible` artifacts at the top of
+  the tab (one entry per port; databases win the tone and tint it warning).
+  "Review with agent" opens the chat pre-filled via `CHAT_PREFILL_EVENT`
+  (`lib/chatHistory.ts`) — always a fresh session, target scoped to the server.
+- The tab auto-rescans every 60s while open (silent scan keeps the list on
+  screen); website rows get an "Open" button (main.ts `setWindowOpenHandler`
+  routes any renderer `window.open`/`target=_blank` http(s) URL to the real
+  browser and denies child windows).
 
 ## Dev
 

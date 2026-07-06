@@ -7,8 +7,12 @@
  */
 import { ConnectionManager } from './connection-manager';
 import {
+  ArtifactAction,
+  ArtifactLogsResult,
+  ArtifactRuntime,
   ArtifactsScanResult,
   ArtifactStatus,
+  OkResult,
   ServerArtifact,
 } from '../shared/ipc-types';
 
@@ -43,7 +47,8 @@ function isLoopbackHost(host: string): boolean {
 function engineOf(source: string): string | undefined {
   const s = source.toLowerCase();
   if (s.includes('postgres')) return 'postgresql';
-  if (s.includes('mysql') || s.includes('maria')) return 'mysql';
+  if (s.includes('maria')) return 'mariadb';
+  if (s.includes('mysql')) return 'mysql';
   if (s.includes('redis') || s.includes('valkey')) return 'redis';
   if (s.includes('mongo')) return 'mongodb';
   if (s.includes('node') || s.includes('pm2')) return 'node';
@@ -187,7 +192,8 @@ function parsePorts(block: string): Map<string, ProcPort[]> {
 const DB_UNITS = /postgres|mysql|maria|redis|valkey|mongo/i;
 const PORT_PROCS: Record<string, RegExp> = {
   postgresql: /^postgres/,
-  mysql: /^(mysqld|mariadbd)/,
+  mysql: /^mysqld/,
+  mariadb: /^mariadbd/,
   redis: /^(redis|valkey)/,
   mongodb: /^mongod/,
   web: /^(nginx|apache2|httpd|caddy)/,
@@ -283,6 +289,140 @@ export function parseArtifacts(raw: string): ServerArtifact[] {
 // ---------------------------------------------------------------------------
 // Scan entry point
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Row actions (start/stop/restart) + logs — the Artifacts tab's buttons
+// ---------------------------------------------------------------------------
+
+/** Container / unit names exactly as docker and systemd produce them (systemd
+ *  template instances need `@`), and nothing that could escape the
+ *  single-quoted shell word we place them in. */
+const SAFE_UNIT_NAME = /^[A-Za-z0-9][A-Za-z0-9_.@-]*$/;
+
+export function isSafeUnitName(name: string): boolean {
+  return name.length <= 128 && SAFE_UNIT_NAME.test(name);
+}
+
+const ARTIFACT_ACTIONS: ArtifactAction[] = ['start', 'stop', 'restart'];
+/** docker stop waits up to 10s per container for a clean exit; give it room. */
+const ACTION_TIMEOUT_MS = 60_000;
+const LOG_TAIL_LINES = 200;
+
+/** Pure builders (escaping pinned by artifacts.test.ts). Callers prepend
+ *  `sudo -n ` for the fallback attempt, so keep these prefix-safe. */
+export function artifactActionCommand(
+  runtime: ArtifactRuntime,
+  name: string,
+  action: ArtifactAction,
+): string {
+  return runtime === 'container'
+    ? `docker ${action} '${name}' 2>&1`
+    : `systemctl ${action} '${name}' 2>&1`;
+}
+
+export function artifactLogsCommand(
+  runtime: ArtifactRuntime,
+  name: string,
+): string {
+  return runtime === 'container'
+    ? `docker logs --tail ${LOG_TAIL_LINES} '${name}' 2>&1`
+    : `journalctl -u '${name}' -n ${LOG_TAIL_LINES} --no-pager 2>&1`;
+}
+
+/** The most useful line of a failed command's output ("Error response from
+ *  daemon: …" is always last), trimmed to toast size. */
+function failureLine(stdout: string, stderr: string): string | undefined {
+  const lines = `${stdout}\n${stderr}`
+    .split('\n')
+    .map((l) => l.trim())
+    .filter(Boolean);
+  const last = lines[lines.length - 1];
+  return last && last.length > 200 ? `${last.slice(0, 197)}…` : last;
+}
+
+export async function runArtifactAction(
+  cm: ConnectionManager,
+  serverId: string,
+  runtime: ArtifactRuntime,
+  name: string,
+  action: ArtifactAction,
+): Promise<OkResult> {
+  if (cm.getStatus(serverId) !== 'connected') {
+    return { ok: false, error: 'Server is not connected.' };
+  }
+  if (!ARTIFACT_ACTIONS.includes(action)) {
+    return { ok: false, error: 'Unsupported action.' };
+  }
+  if (!isSafeUnitName(name)) {
+    return { ok: false, error: 'Invalid container or service name.' };
+  }
+  const cmd = artifactActionCommand(runtime, name, action);
+  try {
+    // Plain first, passwordless sudo second — same idiom as deployments.ts.
+    let res = await cm.exec(serverId, cmd, { timeoutMs: ACTION_TIMEOUT_MS });
+    if (res.exitCode !== 0) {
+      res = await cm.exec(serverId, `sudo -n ${cmd}`, {
+        timeoutMs: ACTION_TIMEOUT_MS,
+      });
+    }
+    if (res.exitCode !== 0) {
+      return {
+        ok: false,
+        error: failureLine(res.stdout, res.stderr) ?? `${action} failed.`,
+      };
+    }
+    return { ok: true };
+  } catch (err) {
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : `${action} failed.`,
+    };
+  }
+}
+
+export async function readArtifactLogs(
+  cm: ConnectionManager,
+  serverId: string,
+  runtime: ArtifactRuntime,
+  name: string,
+): Promise<ArtifactLogsResult> {
+  if (cm.getStatus(serverId) !== 'connected') {
+    return { ok: false, error: 'Server is not connected.' };
+  }
+  if (!isSafeUnitName(name)) {
+    return { ok: false, error: 'Invalid container or service name.' };
+  }
+  const cmd = artifactLogsCommand(runtime, name);
+  // journalctl quietly shows a non-root user nothing (exit 0, no entries), so
+  // services go sudo-first; docker goes plain-first — group access is the norm
+  // and the scanner's docker probe already worked without sudo.
+  const attempts =
+    runtime === 'container' ? [cmd, `sudo -n ${cmd}`] : [`sudo -n ${cmd}`, cmd];
+  try {
+    let res = await cm.exec(serverId, attempts[0], {
+      timeoutMs: 20_000,
+      maxOutputBytes: 256 * 1024,
+    });
+    if (res.exitCode !== 0) {
+      res = await cm.exec(serverId, attempts[1], {
+        timeoutMs: 20_000,
+        maxOutputBytes: 256 * 1024,
+      });
+    }
+    if (res.exitCode !== 0) {
+      return {
+        ok: false,
+        error: failureLine(res.stdout, res.stderr) ?? 'Could not read logs.',
+      };
+    }
+    return { ok: true, content: res.stdout };
+  } catch (err) {
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : 'Could not read logs.',
+    };
+  }
+}
 
 export async function scanArtifacts(
   cm: ConnectionManager,

@@ -627,9 +627,9 @@ function Field({
   const options = field.type === 'select' ? field.options ?? [] : [];
   const glyphs = options.map((o) => optionGlyph(o));
   // When every option is a brand mark (the database engines), show them all
-  // at once as a tile picker instead of hiding them behind a dropdown.
-  const asTiles =
-    options.length > 0 && options.length <= 4 && glyphs.every((g) => g?.color);
+  // at once as a grid of tiles instead of hiding them behind a dropdown —
+  // no cap on option count, so the grid grows as engines are added.
+  const asTiles = options.length > 0 && glyphs.every((g) => g?.color);
 
   return (
     <div className="space-y-2 p-4">
