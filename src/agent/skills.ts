@@ -20,6 +20,7 @@ import { AgentEvent } from '../shared/ipc-types';
 import { resolveRuntimeHome } from '../main/runtimePaths';
 import { nextToolCallId } from './tools';
 
+import checkServerCapacity from './skills/check-server-capacity/SKILL.md?raw';
 import dockerDeploy from './skills/docker-deploy/SKILL.md?raw';
 import dockerComposeStack from './skills/docker-compose-stack/SKILL.md?raw';
 import reverseProxyTls from './skills/reverse-proxy-tls/SKILL.md?raw';
@@ -56,6 +57,7 @@ export type Skill = {
 const MAX_SKILL_BODY = 24 * 1024;
 
 const BUNDLED_RAW = [
+  checkServerCapacity,
   dockerDeploy,
   dockerComposeStack,
   reverseProxyTls,

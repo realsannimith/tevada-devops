@@ -65,7 +65,7 @@ describe('parseSkill', () => {
 describe('bundledSkills', () => {
   it('every bundled skill parses with a unique name', () => {
     const skills = bundledSkills();
-    expect(skills.length).toBe(24);
+    expect(skills.length).toBe(25);
     const names = skills.map((s) => s.name);
     expect(new Set(names).size).toBe(names.length);
     for (const s of skills) {
