@@ -115,6 +115,13 @@ jobs:
         if: ${{ runner.os == 'Windows' }}
         run: bun install --frozen-lockfile --ignore-scripts
 
+      # --ignore-scripts skips electron-winstaller's install script, which
+      # creates vendor/7z.exe|dll (Squirrel needs them). Run it explicitly.
+      - name: Prepare Squirrel 7-Zip (Windows)
+        if: ${{ runner.os == 'Windows' }}
+        shell: bash
+        run: cd node_modules/electron-winstaller && node script/select-7z-arch.js
+
       - name: Install Linux packaging tools
         if: ${{ runner.os == 'Linux' }}
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends fakeroot dpkg rpm
@@ -137,15 +144,15 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p release-assets
-          shopt -s nullglob globstar
-          for f in out/make/**/*.zip \
-                   out/make/**/*.dmg \
-                   out/make/**/*.exe \
-                   out/make/**/*.nupkg \
-                   out/make/**/*.deb \
-                   out/make/**/*.rpm; do
-            cp "$f" release-assets/ 2>/dev/null || true
-          done
+          # find (not globstar): GitHub's macOS runners ship bash 3.2.
+          find out/make -type f \( \
+            -name '*.zip' -o \
+            -name '*.dmg' -o \
+            -name '*.exe' -o \
+            -name '*.nupkg' -o \
+            -name '*.deb' -o \
+            -name '*.rpm' \
+          \) -exec cp {} release-assets/ \;
           ls -la release-assets
 
       - name: Upload artifacts

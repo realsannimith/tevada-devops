@@ -29,6 +29,10 @@ const config: ForgeConfig = {
     asar: true,
     icon: iconPath,
     extraResource: [path.join(rootDir, 'resources')],
+    // The deb/rpm makers require a binary named after package.json `name`;
+    // Packager otherwise names it after productName ("Tevada DevOps").
+    // Linux-only so the macOS/Windows executables keep the product name.
+    ...(process.platform === 'linux' ? { executableName: 'tevada-devops' } : {}),
   },
   rebuildConfig: {},
   makers: [

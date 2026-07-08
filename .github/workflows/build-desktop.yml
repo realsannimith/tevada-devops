@@ -68,6 +68,16 @@ jobs:
         if: ${{ runner.os == 'Windows' }}
         run: bun install --frozen-lockfile --ignore-scripts
 
+      # --ignore-scripts above also skips electron-winstaller's install script,
+      # which copies vendor/7z-<arch>.exe|dll into place as vendor/7z.exe|dll
+      # (the npm tarball ships only the arch-suffixed copies). Squirrel shells
+      # out to 7z.exe and fails with "The system cannot find the file
+      # specified" without it — so run that script explicitly.
+      - name: Prepare Squirrel 7-Zip (Windows)
+        if: ${{ runner.os == 'Windows' }}
+        shell: bash
+        run: cd node_modules/electron-winstaller && node script/select-7z-arch.js
+
       # electron-forge's deb/rpm makers need these packaging tools on Linux.
       - name: Install Linux packaging tools
         if: ${{ runner.os == 'Linux' }}
@@ -87,17 +97,18 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p build-output
-          shopt -s nullglob globstar
-          # electron-forge writes distributables under out/make/**.
-          for f in out/make/**/*.zip \
-                   out/make/**/*.dmg \
-                   out/make/**/*.exe \
-                   out/make/**/*.nupkg \
-                   out/make/**/*.deb \
-                   out/make/**/*.rpm \
-                   out/make/**/RELEASES; do
-            cp "$f" build-output/ 2>/dev/null || true
-          done
+          # Use find (not `**`/globstar) — GitHub's macOS runners ship bash 3.2,
+          # which doesn't support the globstar option. electron-forge writes
+          # distributables under out/make/.
+          find out/make -type f \( \
+            -name '*.zip' -o \
+            -name '*.dmg' -o \
+            -name '*.exe' -o \
+            -name '*.nupkg' -o \
+            -name '*.deb' -o \
+            -name '*.rpm' -o \
+            -name 'RELEASES' \
+          \) -exec cp {} build-output/ \;
           echo "Collected:" && ls -la build-output
 
       - name: Upload artifacts
