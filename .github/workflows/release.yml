@@ -170,7 +170,7 @@ jobs:
           path: release-assets
 
       - name: Publish release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ needs.preflight.outputs.tag }}
           name: Tevada DevOps v${{ needs.preflight.outputs.version }}
