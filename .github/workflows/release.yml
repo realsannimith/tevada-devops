@@ -85,7 +85,9 @@ jobs:
             runner: macos-14
             arch: arm64
           - label: macOS x64
-            runner: macos-13
+            # macos-13 was retired (Dec 2025) — jobs targeting it queue
+            # forever. macos-15-intel is GitHub's supported Intel runner.
+            runner: macos-15-intel
             arch: x64
           - label: Linux x64
             runner: ubuntu-24.04
