@@ -339,6 +339,26 @@ export function ArtifactsView({
     });
   }, []);
 
+  /** Hand a service off to the agent to put a domain in front of it — the agent
+   *  answers with the on-screen domain form (requestDomainSetup). */
+  const setupDomain = useCallback(
+    (a: ServerArtifact) => {
+      const port = a.ports?.[0];
+      onNavigate({ kind: 'chat' });
+      window.dispatchEvent(
+        new CustomEvent<ChatPrefillDetail>(CHAT_PREFILL_EVENT, {
+          detail: {
+            serverId,
+            message: `Set up a custom domain for "${a.name}"${
+              port ? ` (listening on port ${port})` : ''
+            }.`,
+          },
+        }),
+      );
+    },
+    [onNavigate, serverId],
+  );
+
   if (!connected) {
     return (
       <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
@@ -452,6 +472,7 @@ export function ArtifactsView({
                       logsOpen={openLogs.has(a.id)}
                       onToggleLogs={() => toggleLogs(a.id)}
                       onAction={runAction}
+                      onSetupDomain={() => setupDomain(a)}
                       onOpenEnv={() => openEnvFor(a.name)}
                       onRequestRemoteAccess={requestRemoteAccess}
                       onOpenCredentials={(meta) =>
@@ -536,6 +557,7 @@ function ArtifactRow({
   logsOpen,
   onToggleLogs,
   onAction,
+  onSetupDomain,
   onOpenEnv,
   onRequestRemoteAccess,
   onOpenCredentials,
@@ -557,6 +579,8 @@ function ArtifactRow({
     runtime: ArtifactRuntime,
     action: ArtifactAction,
   ) => void;
+  /** Hand this service to the agent to put a custom domain in front of it. */
+  onSetupDomain: () => void;
   onOpenEnv: () => void;
   onRequestRemoteAccess: (artifact: ServerArtifact) => void;
   /** Called with the matched credential, or undefined if nothing is saved
@@ -655,6 +679,22 @@ function ArtifactRow({
         >
           <ExternalLinkIcon className="size-3.5" />
           Open
+        </Button>
+      )}
+      {/* Put a custom domain in front of anything web-facing — the agent
+          answers with the on-screen domain form. Not for databases/backups. */}
+      {(artifact.kind === 'website' ||
+        artifact.kind === 'container' ||
+        artifact.kind === 'service') && (
+        <Button
+          variant="ghost"
+          size="sm"
+          className="hidden h-7 shrink-0 gap-1.5 px-2.5 text-[11px] text-muted-foreground sm:inline-flex"
+          onClick={onSetupDomain}
+          title={`Set up a domain for ${artifact.name}`}
+        >
+          <WorldIcon className="size-3.5" />
+          Domain
         </Button>
       )}
       {artifact.status === 'running' ? (

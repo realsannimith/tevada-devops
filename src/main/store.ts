@@ -18,8 +18,11 @@ import {
   DatabaseCredentialMeta,
   DEFAULT_ALERT_CONFIG,
   DEFAULT_ALERT_THRESHOLDS,
+  CodexAccount,
   DEFAULT_SETTINGS,
+  GoogleDriveAccount,
   GithubAccount,
+  Project,
   ServerAlertConfig,
   ServerProfile,
 } from '../shared/ipc-types';
@@ -33,6 +36,8 @@ type LegacyChatHistory = {
 
 type StoreData = {
   servers: ServerProfile[];
+  /** Local server groupings + per-project agent memory. */
+  projects: Project[];
   settings: AppSettings;
   chatSessions: ChatSession[];
   activeChatSessionId: string | null;
@@ -40,12 +45,17 @@ type StoreData = {
   dbCredentials: DatabaseCredentialMeta[];
   /** Connected GitHub account metadata (the token itself is in secrets.ts). */
   github?: GithubAccount;
+  /** Connected Codex (ChatGPT subscription) metadata (tokens are in secrets.ts). */
+  codex?: CodexAccount;
+  /** Connected Google Drive metadata (tokens are in secrets.ts). */
+  googleDrive?: GoogleDriveAccount;
   /** Telegram alerting config (the bot token itself is in secrets.ts). */
   alerts?: AlertConfig;
 };
 
 const EMPTY: StoreData = {
   servers: [],
+  projects: [],
   settings: { ...DEFAULT_SETTINGS },
   chatSessions: [],
   activeChatSessionId: null,
@@ -56,34 +66,139 @@ function storePath(): string {
   return path.join(app.getPath('userData'), 'easyhost.json');
 }
 
-function read(): StoreData {
+// Every field is freshly allocated — never alias EMPTY's arrays. A caller that
+// gets this from read() may mutate `.servers`/`.projects` in place before
+// writing (see addServer), which would otherwise corrupt the shared EMPTY
+// constant and leak entries into the next "empty" read.
+function emptyStore(): StoreData {
+  return {
+    servers: [],
+    projects: [],
+    settings: { ...DEFAULT_SETTINGS },
+    chatSessions: [],
+    activeChatSessionId: null,
+    dbCredentials: [],
+  };
+}
+
+/** Parse + normalize raw store JSON. Throws on invalid JSON (caught by read). */
+function parseStore(raw: string): StoreData {
+  const parsed = JSON.parse(raw) as Partial<StoreData> & {
+    chatHistory?: LegacyChatHistory;
+  };
+  const sessions = Array.isArray(parsed.chatSessions)
+    ? parsed.chatSessions.map(normalizeChatSession).filter((s): s is ChatSession => s !== null)
+    : migrateLegacyChatHistory(parsed.chatHistory);
+  return {
+    servers: Array.isArray(parsed.servers)
+      ? parsed.servers.map(normalizeServer)
+      : [],
+    projects: Array.isArray(parsed.projects)
+      ? parsed.projects
+          .map(normalizeProject)
+          .filter((p): p is Project => p !== null)
+      : [],
+    settings: { ...DEFAULT_SETTINGS, ...(parsed.settings ?? {}) },
+    chatSessions: sessions,
+    activeChatSessionId:
+      typeof parsed.activeChatSessionId === 'string'
+        ? parsed.activeChatSessionId
+        : (sessions[0]?.id ?? null),
+    dbCredentials: Array.isArray(parsed.dbCredentials)
+      ? parsed.dbCredentials.map(normalizeDbCredentialMeta).filter(
+          (c): c is DatabaseCredentialMeta => c !== null,
+        )
+      : [],
+    github: parsed.github,
+    codex: parsed.codex,
+    googleDrive: parsed.googleDrive,
+    alerts: parsed.alerts ? normalizeAlertConfig(parsed.alerts) : undefined,
+  };
+}
+
+/**
+ * Recover from a store file that exists but won't parse. Silently returning
+ * EMPTY here is dangerous: the next mutation would write empty data over the
+ * (recoverable) corrupt file, permanently wiping every server, project and
+ * credential. Instead we preserve the corrupt file for forensics and try to
+ * restore the last-good backup written by write().
+ */
+function recoverCorruptStore(file: string, err: unknown): StoreData {
+  const corruptPath = `${file}.corrupt-${Date.now()}`;
   try {
-    const raw = fs.readFileSync(storePath(), 'utf8');
-    const parsed = JSON.parse(raw) as Partial<StoreData> & {
-      chatHistory?: LegacyChatHistory;
-    };
-    const sessions = Array.isArray(parsed.chatSessions)
-      ? parsed.chatSessions.map(normalizeChatSession).filter((s): s is ChatSession => s !== null)
-      : migrateLegacyChatHistory(parsed.chatHistory);
-    return {
-      servers: Array.isArray(parsed.servers) ? parsed.servers : [],
-      settings: { ...DEFAULT_SETTINGS, ...(parsed.settings ?? {}) },
-      chatSessions: sessions,
-      activeChatSessionId:
-        typeof parsed.activeChatSessionId === 'string'
-          ? parsed.activeChatSessionId
-          : (sessions[0]?.id ?? null),
-      dbCredentials: Array.isArray(parsed.dbCredentials)
-        ? parsed.dbCredentials.map(normalizeDbCredentialMeta).filter(
-            (c): c is DatabaseCredentialMeta => c !== null,
-          )
-        : [],
-      github: parsed.github,
-      alerts: parsed.alerts ? normalizeAlertConfig(parsed.alerts) : undefined,
-    };
+    fs.renameSync(file, corruptPath);
   } catch {
-    return { ...EMPTY, settings: { ...DEFAULT_SETTINGS }, chatSessions: [], dbCredentials: [] };
+    /* best effort — if we can't move it, at least don't overwrite below */
   }
+  console.error('[store] store file was unreadable; preserved a copy', {
+    corruptPath,
+    error: err instanceof Error ? err.message : String(err),
+  });
+  const bak = `${file}.bak`;
+  try {
+    const data = parseStore(fs.readFileSync(bak, 'utf8'));
+    // Restore the good backup into place so every later read() is consistent
+    // (read re-reads from disk each call — an un-persisted recovery would be
+    // seen only once).
+    try {
+      fs.copyFileSync(bak, file);
+    } catch {
+      /* best effort */
+    }
+    console.warn('[store] recovered store from last-good backup');
+    return data;
+  } catch {
+    return emptyStore();
+  }
+}
+
+function read(): StoreData {
+  const file = storePath();
+  let raw: string;
+  try {
+    raw = fs.readFileSync(file, 'utf8');
+  } catch {
+    // File absent (fresh install) or unreadable — legitimately empty.
+    return emptyStore();
+  }
+  try {
+    return parseStore(raw);
+  } catch (err) {
+    return recoverCorruptStore(file, err);
+  }
+}
+
+/** Defensive normalize on read: default projectIds to [] so older stores (and
+ *  servers saved before Projects existed) always expose the field. */
+function normalizeServer(value: ServerProfile): ServerProfile {
+  return {
+    ...value,
+    projectIds: Array.isArray(value.projectIds)
+      ? value.projectIds.filter((id): id is string => typeof id === 'string')
+      : [],
+  };
+}
+
+function normalizeProject(value: unknown): Project | null {
+  if (!value || typeof value !== 'object') return null;
+  const record = value as Partial<Project>;
+  if (typeof record.id !== 'string' || record.id.length === 0) return null;
+  if (typeof record.name !== 'string' || record.name.length === 0) return null;
+  const createdAt =
+    typeof record.createdAt === 'number' && Number.isFinite(record.createdAt)
+      ? record.createdAt
+      : Date.now();
+  return {
+    id: record.id,
+    name: record.name,
+    color: typeof record.color === 'string' ? record.color : undefined,
+    memory: typeof record.memory === 'string' ? record.memory : undefined,
+    createdAt,
+    updatedAt:
+      typeof record.updatedAt === 'number' && Number.isFinite(record.updatedAt)
+        ? record.updatedAt
+        : createdAt,
+  };
 }
 
 function normalizeAlertConfig(value: unknown): AlertConfig {
@@ -172,8 +287,35 @@ function write(data: StoreData): void {
   const target = storePath();
   const tmp = `${target}.tmp`;
   fs.mkdirSync(path.dirname(target), { recursive: true });
+  // Roll the last successfully-written file into a backup before overwriting,
+  // so a future corrupt read can auto-recover from it (see recoverCorruptStore).
+  try {
+    if (fs.existsSync(target)) fs.copyFileSync(target, `${target}.bak`);
+  } catch {
+    /* best effort — a missing backup only weakens recovery, never blocks a write */
+  }
   fs.writeFileSync(tmp, JSON.stringify(data, null, 2), 'utf8');
   fs.renameSync(tmp, target);
+  notifyWrite();
+}
+
+const writeListeners = new Set<() => void>();
+
+export function onWrite(listener: () => void): () => void {
+  writeListeners.add(listener);
+  return () => writeListeners.delete(listener);
+}
+
+function notifyWrite(): void {
+  for (const listener of writeListeners) {
+    try {
+      listener();
+    } catch (error) {
+      console.warn('[store] write listener failed', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
 }
 
 /** One-time upgrade path: the pre-sessions store kept a single chat transcript. */
@@ -226,11 +368,19 @@ function normalizeChatSession(value: unknown): ChatSession | null {
       ? record.status
       : undefined,
     pinned: record.pinned === true ? true : undefined,
+    tokens:
+      typeof record.tokens === 'number' &&
+      Number.isFinite(record.tokens) &&
+      record.tokens > 0
+        ? record.tokens
+        : undefined,
     items: Array.isArray(record.items)
       ? record.items.filter(isChatHistoryItem)
       : [],
     targetServerId:
       typeof record.targetServerId === 'string' ? record.targetServerId : null,
+    projectId:
+      typeof record.projectId === 'string' ? record.projectId : null,
     createdAt:
       typeof record.createdAt === 'number' && Number.isFinite(record.createdAt)
         ? record.createdAt
@@ -248,6 +398,9 @@ function isChatHistoryItem(value: unknown): value is ChatHistoryItem {
       (item.role === 'user' || item.role === 'assistant') &&
       typeof item.content === 'string'
     );
+  }
+  if (item.kind === 'reasoning') {
+    return typeof item.id === 'string' && typeof item.content === 'string';
   }
   if (item.kind === 'tool') {
     return (
@@ -268,6 +421,16 @@ function isChatHistoryItem(value: unknown): value is ChatHistoryItem {
             t.status === 'in_progress' ||
             t.status === 'completed'),
       )
+    );
+  }
+  if (item.kind === 'form') {
+    return (
+      typeof item.formId === 'string' &&
+      typeof item.title === 'string' &&
+      Array.isArray(item.fields) &&
+      (item.status === 'pending' ||
+        item.status === 'submitted' ||
+        item.status === 'cancelled')
     );
   }
   return false;
@@ -306,6 +469,69 @@ export function removeServer(id: string): void {
   const data = read();
   data.servers = data.servers.filter((s) => s.id !== id);
   write(data);
+}
+
+// --- projects --------------------------------------------------------------
+
+export function listProjects(): Project[] {
+  return read().projects;
+}
+
+export function getProject(id: string): Project | undefined {
+  return read().projects.find((p) => p.id === id);
+}
+
+export function addProject(project: Project): Project {
+  const data = read();
+  data.projects.push(project);
+  write(data);
+  return project;
+}
+
+export function updateProject(
+  id: string,
+  patch: Partial<Omit<Project, 'id' | 'createdAt'>>,
+): Project | undefined {
+  const data = read();
+  const idx = data.projects.findIndex((p) => p.id === id);
+  if (idx === -1) return undefined;
+  data.projects[idx] = { ...data.projects[idx], ...patch, updatedAt: Date.now() };
+  write(data);
+  return data.projects[idx];
+}
+
+/**
+ * Removes a project and detaches it everywhere — following the servers:remove
+ * cascade precedent. Servers and chats are KEPT: we only strip the project id
+ * from each server's membership and clear it off any tagged chat session.
+ */
+export function removeProject(id: string): void {
+  const data = read();
+  data.projects = data.projects.filter((p) => p.id !== id);
+  for (const server of data.servers) {
+    if (server.projectIds?.includes(id)) {
+      server.projectIds = server.projectIds.filter((pid) => pid !== id);
+    }
+  }
+  for (const session of data.chatSessions) {
+    if (session.projectId === id) session.projectId = null;
+  }
+  write(data);
+}
+
+/** Sets a server's full project membership (replaces the array). */
+export function setServerProjects(
+  serverId: string,
+  projectIds: string[],
+): ServerProfile | undefined {
+  return updateServer(serverId, { projectIds: [...new Set(projectIds)] });
+}
+
+/** Ids of the servers that belong to a project. */
+export function listServerIdsForProject(projectId: string): string[] {
+  return read()
+    .servers.filter((s) => s.projectIds?.includes(projectId))
+    .map((s) => s.id);
 }
 
 // --- database credentials (metadata only) -----------------------------------
@@ -441,6 +667,7 @@ function sameSessionContent(a: ChatSession, b: ChatSession): boolean {
     a.status === b.status &&
     a.playbookId === b.playbookId &&
     (a.targetServerId ?? null) === (b.targetServerId ?? null) &&
+    (a.projectId ?? null) === (b.projectId ?? null) &&
     JSON.stringify(a.items) === JSON.stringify(b.items)
   );
 }
@@ -463,6 +690,10 @@ export function upsertChatSession(session: ChatSession): ChatHistoryState {
       // The pinned flag is owned by setChatSessionPinned, not the ChatPanel's
       // debounced saves — preserve it so a background re-save can't unpin a row.
       pinned: normalized.pinned ?? prev.pinned,
+      // Likewise the title is owned by renameChatSession (chat saves never set
+      // one) and the token tally by whichever save last reported it.
+      title: normalized.title ?? prev.title,
+      tokens: normalized.tokens ?? prev.tokens,
     };
     // Reopening a conversation re-saves it verbatim (the ChatPanel's
     // normalize-after-load pass). Identical content is not activity: keep the
@@ -471,6 +702,19 @@ export function upsertChatSession(session: ChatSession): ChatHistoryState {
     data.chatSessions[idx] = next;
   }
   write(data);
+  return chatState(data);
+}
+
+/** Sets a session's explicit title (user rename). An empty title clears the
+ *  rename, so chats fall back to deriving one from their first message. */
+export function renameChatSession(id: string, title: string): ChatHistoryState {
+  const data = read();
+  const session = data.chatSessions.find((s) => s.id === id);
+  if (session) {
+    const trimmed = title.trim();
+    session.title = trimmed.length > 0 ? trimmed : undefined;
+    write(data);
+  }
   return chatState(data);
 }
 
@@ -536,6 +780,52 @@ export function setGithubAccount(account: GithubAccount | undefined): void {
   const data = read();
   data.github = account;
   write(data);
+}
+
+// --- codex (ChatGPT subscription) account -------------------------------------
+
+export function getCodexAccount(): CodexAccount | undefined {
+  return read().codex;
+}
+
+export function setCodexAccount(account: CodexAccount | undefined): void {
+  const data = read();
+  data.codex = account;
+  write(data);
+}
+
+// --- google drive app-data sync ---------------------------------------------
+
+export function getGoogleDriveAccount(): GoogleDriveAccount | undefined {
+  return read().googleDrive;
+}
+
+export function setGoogleDriveAccount(account: GoogleDriveAccount | undefined): void {
+  const data = read();
+  data.googleDrive = account;
+  write(data);
+}
+
+/**
+ * Overwrite the whole store from a restored Drive snapshot. The backup omits
+ * the `googleDrive` field (tokens/connection), so the live connection is kept
+ * as-is — restoring must never sign the user out of the Drive they restored
+ * from. Chat sessions are also omitted from backups (they can hold plaintext
+ * credentials — see googleDriveSync.readStoreData), so the local transcript is
+ * preserved rather than wiped by a restore. The written data is re-normalized
+ * on the next read().
+ */
+export function restoreStoreData(snapshot: unknown): void {
+  const current = read();
+  const base: Partial<StoreData> =
+    snapshot && typeof snapshot === 'object' ? { ...(snapshot as StoreData) } : {};
+  base.googleDrive = current.googleDrive;
+  // Keep device-local chat history if the snapshot didn't carry any.
+  if (!Array.isArray(base.chatSessions) || base.chatSessions.length === 0) {
+    base.chatSessions = current.chatSessions;
+    base.activeChatSessionId = current.activeChatSessionId;
+  }
+  write({ ...EMPTY, ...base });
 }
 
 // --- telegram alerting -------------------------------------------------------

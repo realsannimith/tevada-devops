@@ -29,6 +29,26 @@ function secretPath(serverId: string): string {
   return path.join(secretsDir(), `${serverId}.bin`);
 }
 
+const writeListeners = new Set<(id: string) => void>();
+
+export function onWrite(listener: (id: string) => void): () => void {
+  writeListeners.add(listener);
+  return () => writeListeners.delete(listener);
+}
+
+function notifyWrite(id: string): void {
+  for (const listener of writeListeners) {
+    try {
+      listener(id);
+    } catch (error) {
+      console.warn('[secrets] write listener failed', {
+        id,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+}
+
 /** True when the OS provides a real encryption backend (keychain/keyring). */
 export function secretsAvailable(): boolean {
   try {
@@ -80,6 +100,7 @@ export function saveSecret(serverId: string, secret: ServerSecret): void {
   const tmp = `${secretPath(serverId)}.tmp`;
   fs.writeFileSync(tmp, encrypted);
   fs.renameSync(tmp, secretPath(serverId));
+  notifyWrite(serverId);
 }
 
 export function loadSecret(serverId: string): ServerSecret | undefined {
@@ -99,6 +120,7 @@ export function loadSecret(serverId: string): ServerSecret | undefined {
 export function deleteSecret(serverId: string): void {
   try {
     fs.unlinkSync(secretPath(serverId));
+    notifyWrite(serverId);
   } catch {
     /* already gone */
   }
@@ -117,6 +139,12 @@ export function saveRawSecret(id: string, value: string): void {
   const tmp = `${secretPath(id)}.tmp`;
   fs.writeFileSync(tmp, encrypted);
   fs.renameSync(tmp, secretPath(id));
+  notifyWrite(id);
+}
+
+/** Whether a raw secret blob exists, without decrypting (no warn spam). */
+export function hasRawSecret(id: string): boolean {
+  return fs.existsSync(secretPath(id));
 }
 
 export function loadRawSecret(id: string): string | undefined {
@@ -134,6 +162,7 @@ export function loadRawSecret(id: string): string | undefined {
 export function deleteRawSecret(id: string): void {
   try {
     fs.unlinkSync(secretPath(id));
+    notifyWrite(id);
   } catch {
     /* already gone */
   }

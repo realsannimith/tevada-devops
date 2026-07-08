@@ -51,6 +51,9 @@ export type ChatHistorySummary = {
   pinned: boolean;
   messageCount: number;
   updatedAt: number;
+  /** Project this chat is tagged to (null = untagged) — drives the History
+   *  project filter and the row's project chip. */
+  projectId: string | null;
 };
 
 /** Sidebar/status-chip presentation for each session lifecycle state.
@@ -76,15 +79,20 @@ export function newChatSessionId(): string {
 }
 
 /**
- * A persisted transcript can contain tools frozen at 'running' if the app
- * died mid-run; render them as finished so they don't spin forever.
+ * A persisted transcript can contain tools frozen at 'running' — or a form
+ * frozen at 'pending' — if the app died mid-run. Settle them so a reopened
+ * transcript doesn't spin forever or offer a form whose run is long gone.
  */
 export function markInterruptedToolsDone(items: ChatHistoryItem[]): ChatHistoryItem[] {
-  return items.map((item) =>
-    item.kind === 'tool' && item.status === 'running'
-      ? { ...item, status: 'done' as const }
-      : item,
-  );
+  return items.map((item) => {
+    if (item.kind === 'tool' && item.status === 'running') {
+      return { ...item, status: 'done' as const };
+    }
+    if (item.kind === 'form' && item.status === 'pending') {
+      return { ...item, status: 'cancelled' as const };
+    }
+    return item;
+  });
 }
 
 export function summarizeChatSession(session: ChatSession): ChatHistorySummary | null {
@@ -101,6 +109,7 @@ export function summarizeChatSession(session: ChatSession): ChatHistorySummary |
       pinned: session.pinned === true,
       messageCount: textItems.length,
       updatedAt: session.updatedAt,
+      projectId: session.projectId ?? null,
     };
   }
 
@@ -110,15 +119,18 @@ export function summarizeChatSession(session: ChatSession): ChatHistorySummary |
     textItems.find((item) => item.role === 'user')?.content.trim() ??
     textItems[0]?.content.trim() ??
     'Agent chat';
+  // A user rename (explicit title) always wins over the derived one.
+  const explicitTitle = session.title?.trim();
 
   return {
     id: session.id,
     kind,
-    title: compactTitle(firstUserMessage),
+    title: compactTitle(explicitTitle || firstUserMessage),
     status: session.status,
     pinned: session.pinned === true,
     messageCount: textItems.length,
     updatedAt: session.updatedAt,
+    projectId: session.projectId ?? null,
   };
 }
 

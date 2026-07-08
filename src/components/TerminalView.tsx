@@ -19,6 +19,8 @@ type Cached = {
   typeahead: TypeaheadController;
   sessionId: string | null;
   disposers: (() => void)[];
+  /** In-flight open, so concurrent callers don't each spawn a session + handlers. */
+  opening: Promise<void> | null;
 };
 
 const cache = new Map<string, Cached>();
@@ -90,42 +92,64 @@ function getOrCreate(serverId: string): Cached {
     typeahead,
     sessionId: null,
     disposers: [],
+    opening: null,
   };
   cache.set(serverId, entry);
   return entry;
 }
 
+/** Dispose any input/output handlers left over from a previous session. */
+function tearDownSession(entry: Cached) {
+  entry.disposers.forEach((d) => d());
+  entry.disposers = [];
+}
+
 async function ensureSession(serverId: string, entry: Cached) {
   if (entry.sessionId) return;
-  entry.fit.fit();
-  const { cols, rows } = entry.term;
-  const { sessionId } = await window.easyhost.term.open(serverId, cols, rows);
-  entry.sessionId = sessionId;
+  // Dedupe concurrent callers: without this, two callers can both pass the
+  // sessionId===null guard before either awaits term.open, each opening a PTY
+  // and registering its own onData handler → every keystroke sent twice.
+  if (entry.opening) return entry.opening;
 
-  const onData = entry.term.onData((data) => {
-    entry.typeahead.handleInput(data, (d) => {
-      if (entry.sessionId)
-        window.easyhost.term.input(serverId, entry.sessionId, d);
+  entry.opening = (async () => {
+    // Drop any handlers left over from a previous (now-closed) session on this
+    // cached terminal. onExit nulls sessionId but leaves the old onData handler
+    // attached; re-registering here without this stacks a second handler, so a
+    // reconnected session echoes each keystroke twice ("c" → "cc" → "ccc"…).
+    tearDownSession(entry);
+
+    entry.fit.fit();
+    const { cols, rows } = entry.term;
+    const { sessionId } = await window.easyhost.term.open(serverId, cols, rows);
+    entry.sessionId = sessionId;
+
+    const onData = entry.term.onData((data) => {
+      entry.typeahead.handleInput(data, (d) => {
+        if (entry.sessionId)
+          window.easyhost.term.input(serverId, entry.sessionId, d);
+      });
     });
-  });
-  const unsubData = window.easyhost.term.onData(({ sessionId: sid, data }) => {
-    if (sid !== entry.sessionId) return;
-    // Write the real echo first, then reconcile predictions against the new
-    // cursor position.
-    entry.term.write(data, () => entry.typeahead.handleServerData(data));
-  });
-  const unsubExit = window.easyhost.term.onExit(({ sessionId: sid }) => {
-    if (sid === entry.sessionId) {
-      entry.typeahead.clear();
-      entry.term.writeln('\r\n\x1b[31m[session closed]\x1b[0m');
-      entry.sessionId = null;
-    }
-  });
-  entry.disposers.push(
-    () => onData.dispose(),
-    unsubData,
-    unsubExit,
-  );
+    const unsubData = window.easyhost.term.onData(({ sessionId: sid, data }) => {
+      if (sid !== entry.sessionId) return;
+      // Write the real echo first, then reconcile predictions against the new
+      // cursor position.
+      entry.term.write(data, () => entry.typeahead.handleServerData(data));
+    });
+    const unsubExit = window.easyhost.term.onExit(({ sessionId: sid }) => {
+      if (sid === entry.sessionId) {
+        entry.typeahead.clear();
+        entry.term.writeln('\r\n\x1b[31m[session closed]\x1b[0m');
+        entry.sessionId = null;
+      }
+    });
+    entry.disposers.push(() => onData.dispose(), unsubData, unsubExit);
+  })();
+
+  try {
+    await entry.opening;
+  } finally {
+    entry.opening = null;
+  }
 }
 
 export function TerminalView({ serverId }: { serverId: string }) {

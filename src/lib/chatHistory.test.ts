@@ -35,6 +35,30 @@ describe('summarizeChatSession', () => {
     });
   });
 
+  it('prefers an explicit (renamed) title over the derived one', () => {
+    const summary = summarizeChatSession(
+      session({
+        title: 'Shop API deploy',
+        items: [
+          { kind: 'text', id: 'u1', role: 'user', content: 'install nginx please' },
+        ],
+      }),
+    );
+    expect(summary?.title).toBe('Shop API deploy');
+  });
+
+  it('falls back to the derived title when the explicit one is blank', () => {
+    const summary = summarizeChatSession(
+      session({
+        title: '   ',
+        items: [
+          { kind: 'text', id: 'u1', role: 'user', content: 'install nginx please' },
+        ],
+      }),
+    );
+    expect(summary?.title).toBe('install nginx please');
+  });
+
   it('carries the pinned flag through, defaulting to false', () => {
     const items = [
       { kind: 'text', id: 'u1', role: 'user', content: 'hi' } as const,
@@ -152,5 +176,27 @@ describe('markInterruptedToolsDone', () => {
     expect(items[1]).toMatchObject({ toolCallId: 't1', status: 'done' });
     expect(items[2]).toMatchObject({ toolCallId: 't2', status: 'done' });
     expect(items[0]).toMatchObject({ kind: 'text', content: 'hi' });
+  });
+
+  it('cancels a form frozen at pending (its run is gone) but keeps settled ones', () => {
+    const items = markInterruptedToolsDone([
+      {
+        kind: 'form',
+        formId: 'f1',
+        title: 'Domain',
+        fields: [],
+        status: 'pending',
+      },
+      {
+        kind: 'form',
+        formId: 'f2',
+        title: 'Domain',
+        fields: [],
+        status: 'submitted',
+        values: { domain: 'x.com' },
+      },
+    ]);
+    expect(items[0]).toMatchObject({ formId: 'f1', status: 'cancelled' });
+    expect(items[1]).toMatchObject({ formId: 'f2', status: 'submitted' });
   });
 });

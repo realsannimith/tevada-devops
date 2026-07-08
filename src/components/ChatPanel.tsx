@@ -1,4 +1,14 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
 import { Button } from '@/components/ui/button';
 import {
   Select,
@@ -16,8 +26,10 @@ import {
   COMPOSER_FOOTER_PICKER_TRIGGER_CLASS_NAME,
   COMPOSER_INPUT_ROW_CLASS_NAME,
 } from '@/components/chat/composerStyles';
+import { ModelOptionsMenu } from '@/components/chat/ModelOptionsMenu';
 import type { FeedItem } from '@/hooks/useAgentRun';
 import { useServers } from '@/hooks/useServers';
+import { useProjects } from '@/hooks/useProjects';
 import {
   CHAT_HISTORY_UPDATED_EVENT,
   CHAT_NEW_SESSION_EVENT,
@@ -29,24 +41,57 @@ import {
   type ChatPrefillDetail,
 } from '@/lib/chatHistory';
 import { chatRunManager, useChatRun } from '@/lib/chatRunManager';
-import type { ChatSession, ChatSessionStatus } from '@/shared/ipc-types';
+import { buildAgentMessages } from '@/lib/chatMessages';
+import { toast } from 'sonner';
 import {
+  formatBytes,
+  readFileAttachment,
+} from '@/lib/attachments';
+import type {
+  ChatAttachment,
+  ChatSession,
+  ChatSessionStatus,
+  ChatTodoHistoryItem,
+  TurnDispatchMode,
+} from '@/shared/ipc-types';
+import { ATTACHMENT_LIMITS } from '@/shared/ipc-types';
+import {
+  ClockIcon,
   ComposerSendArrowIcon,
+  FileTextIcon,
+  FolderIcon,
+  PaperclipIcon,
   PlusIcon,
   ServerIcon,
   SparklesIcon,
   TrashIcon,
+  XIcon,
 } from '@/lib/icons';
 
 const ALL = '__all__';
+const NO_PROJECT = '__no_project__';
 const COMPOSER_MAX_HEIGHT_PX = 200;
+
+/** A message the user queued while the agent was running. */
+type QueuedTurn = { id: string; text: string; attachments: ChatAttachment[] };
+/** File picker filter — images plus common text/config/code files. */
+const ATTACH_ACCEPT =
+  'image/*,text/*,.txt,.log,.env,.yml,.yaml,.json,.toml,.ini,.conf,.cfg,.md,.sh,.bash,.dockerfile,.nginx,.service,.py,.js,.ts,.tsx,.jsx,.go,.rs,.rb,.php,.java,.sql,.html,.css,.xml,.csv';
 
 export function ChatPanel() {
   const { servers } = useServers();
+  const { projects } = useProjects();
   const [input, setInput] = useState('');
   const [target, setTarget] = useState<string>(ALL);
+  const [project, setProject] = useState<string>(NO_PROJECT);
   const [historyReady, setHistoryReady] = useState(false);
+  // Files/images staged in the composer, sent with the next message.
+  const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
+  // Messages the user queued while a run was in flight — auto-sent, in order,
+  // once the run finishes (FCode's queued-turn model).
+  const [queuedTurns, setQueuedTurns] = useState<QueuedTurn[]>([]);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   // The session currently displayed in the composer. Generated locally and only
   // persisted (via upsert) once it has at least one message — an empty "new
   // chat" never shows up as a stray entry in the sidebar's history list.
@@ -56,6 +101,11 @@ export function ChatPanel() {
   // Saved transcript of the displayed session — what the feed shows when the
   // session has no live run tracked by chatRunManager.
   const [loadedFeed, setLoadedFeed] = useState<FeedItem[]>([]);
+  // Token tally persisted with the session — shown at the transcript's tail
+  // when there's no live run entry to read it from.
+  const [loadedTokens, setLoadedTokens] = useState(0);
+  // Confirm-before-delete for the header's trash button.
+  const [confirmDelete, setConfirmDelete] = useState(false);
   const createdAtRef = useRef<number>(Date.now());
   // Last persisted lifecycle status of the loaded session, so idle re-saves
   // (e.g. changing the target server) don't overwrite a final state.
@@ -65,6 +115,29 @@ export function ChatPanel() {
   const pendingSessionRef = useRef<ChatSession | null>(null);
   const targetRef = useRef(target);
   targetRef.current = target;
+  const projectRef = useRef(project);
+  projectRef.current = project;
+
+  // Servers the target dropdown may pick from: when a project is chosen, only
+  // its members (keeps the composer honest with the agent's hard scope).
+  const scopedServers = useMemo(
+    () =>
+      project === NO_PROJECT
+        ? servers
+        : servers.filter((s) => s.projectIds?.includes(project)),
+    [servers, project],
+  );
+
+  // If the chosen project doesn't include the current target server, fall back
+  // to "All servers" so we never dispatch to an out-of-scope server.
+  useEffect(() => {
+    if (
+      target !== ALL &&
+      !scopedServers.some((s) => s.id === target)
+    ) {
+      setTarget(ALL);
+    }
+  }, [scopedServers, target]);
 
   // Live run state for the DISPLAYED session only. Runs belong to
   // chatRunManager, not this component: starting a new chat or opening another
@@ -73,9 +146,12 @@ export function ChatPanel() {
   const runState = useChatRun(sessionId);
   const feed = runState?.feed ?? loadedFeed;
   const running = runState?.running ?? false;
-  const tokens = runState?.tokens ?? 0;
+  const tokens = runState ? runState.tokens : loadedTokens;
   const error = runState?.error ?? null;
   const approval = runState?.approval ?? null;
+  // Latest feed for async dispatch (queue auto-send) without stale closures.
+  const feedRef = useRef(feed);
+  feedRef.current = feed;
 
   /** Swap the composer to a saved session (or a fresh draft). Never touches
    *  other sessions' runs. Returns the now-displayed session id. */
@@ -89,7 +165,12 @@ export function ChatPanel() {
         ? 'interrupted'
         : session?.status ?? null;
     setTarget(session?.targetServerId ?? ALL);
+    setProject(session?.projectId ?? NO_PROJECT);
     setLoadedFeed(markInterruptedToolsDone(session?.items ?? []));
+    setLoadedTokens(session?.tokens ?? 0);
+    // Queued turns belong to the conversation you were looking at — don't carry
+    // them into a different one.
+    setQueuedTurns([]);
     return id;
   };
 
@@ -98,7 +179,9 @@ export function ChatPanel() {
     kind: 'chat',
     status,
     items,
+    tokens: tokens > 0 ? tokens : undefined,
     targetServerId: targetRef.current === ALL ? null : targetRef.current,
+    projectId: projectRef.current === NO_PROJECT ? null : projectRef.current,
     createdAt: createdAtRef.current,
     updatedAt: Date.now(),
   });
@@ -228,26 +311,138 @@ export function ChatPanel() {
     el.style.height = `${Math.min(el.scrollHeight, COMPOSER_MAX_HEIGHT_PX)}px`;
   }, [input]);
 
-  async function send() {
-    const text = input.trim();
-    if (!text || running) return;
-    setInput('');
+  // Drain the queue: once the run settles, auto-send the oldest queued turn.
+  // Guarded on chatRunManager's own running flag (fresh, not the render's), so
+  // dispatching the first turn — which flips running true synchronously — blocks
+  // a second dispatch until the next run-end. dispatchTurn is read from a ref so
+  // the effect needn't depend on it (it's redefined every render).
+  const dispatchTurnRef = useRef(dispatchTurn);
+  dispatchTurnRef.current = dispatchTurn;
+  useEffect(() => {
+    if (!historyReady || queuedTurns.length === 0 || running) return;
+    if (chatRunManager.get(sessionIdRef.current)?.running) return;
+    const [next, ...rest] = queuedTurns;
+    setQueuedTurns(rest);
+    void dispatchTurnRef.current({
+      text: next.text,
+      attachments: next.attachments,
+    });
+  }, [running, queuedTurns, historyReady]);
+
+  /** Read picked/pasted/dropped files into staged attachments, enforcing caps.
+   *  Reads happen BEFORE the state update so the setAttachments updater stays
+   *  pure (no side effects) — otherwise React StrictMode's double-invocation
+   *  would stage every file twice. */
+  async function addFiles(files: FileList | File[]) {
+    const list = Array.from(files);
+    if (list.length === 0) return;
+    const added: ChatAttachment[] = [];
+    for (const file of list) {
+      const res = await readFileAttachment(file);
+      // Explicit `=== false`: this repo compiles without strictNullChecks,
+      // where a bare truthiness check does not narrow the union.
+      if (res.ok === false) toast.error(res.error);
+      else added.push(res.attachment);
+    }
+    if (added.length === 0) return;
+    setAttachments((prev) => {
+      const room = Math.max(0, ATTACHMENT_LIMITS.maxCount - prev.length);
+      return [...prev, ...added.slice(0, room)];
+    });
+    // Cap warning outside the updater (fires once, not per StrictMode pass).
+    if (attachments.length + added.length > ATTACHMENT_LIMITS.maxCount) {
+      toast.error(`You can attach up to ${ATTACHMENT_LIMITS.maxCount} files.`);
+    }
+  }
+
+  const removeAttachment = (id: string) =>
+    setAttachments((prev) => prev.filter((a) => a.id !== id));
+
+  /** Start a fresh run for a turn (text + attachments), from the current feed. */
+  async function dispatchTurn(turn: { text: string; attachments: ChatAttachment[] }) {
     statusRef.current = null; // the run's own lifecycle takes over from here
     // Sending makes this the open conversation; record that explicitly since
     // background saves never move the pointer.
-    void window.easyhost.chatHistory.setActive(sessionId);
+    void window.easyhost.chatHistory.setActive(sessionIdRef.current);
+    const baseFeed = feedRef.current;
+    // Carry the current task list into the run so a "continue" turn keeps the
+    // plan — the transcript sent to the model is text-only, todo items aren't.
+    const currentTodos = baseFeed.find(
+      (it): it is ChatTodoHistoryItem => it.kind === 'todos',
+    )?.todos;
+    const projectId =
+      projectRef.current === NO_PROJECT ? null : projectRef.current;
     await chatRunManager.start({
-      sessionId,
-      baseItems: feed,
-      targetServerId: target === ALL ? null : target,
+      sessionId: sessionIdRef.current,
+      baseItems: baseFeed,
+      targetServerId: targetRef.current === ALL ? null : targetRef.current,
+      projectId,
       createdAt: createdAtRef.current,
+      attachments: turn.attachments,
       req: {
-        messages: buildAgentMessages(feed, text),
-        serverIds: target === ALL ? undefined : [target],
+        messages: buildAgentMessages(baseFeed, turn.text || '(see attached)'),
+        serverIds: targetRef.current === ALL ? undefined : [targetRef.current],
+        projectId,
+        todos: currentTodos?.length ? currentTodos : undefined,
+        attachments: turn.attachments.length ? turn.attachments : undefined,
       },
-      userEcho: text,
+      userEcho: turn.text,
     });
   }
+
+  /**
+   * Submit the composer. When the agent is idle this starts a run. When it's
+   * running, FCode-style: 'steer' injects the message into the live run now,
+   * 'queue' parks it above the composer to auto-send when the run finishes.
+   */
+  function submit(mode: TurnDispatchMode) {
+    const text = input.trim();
+    if (!text && attachments.length === 0) return;
+    const turn: QueuedTurn = {
+      id: `q_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+      text,
+      attachments,
+    };
+    setInput('');
+    setAttachments([]);
+    if (!running) {
+      void dispatchTurn({ text, attachments });
+      return;
+    }
+    if (mode === 'steer') {
+      void chatRunManager.steer(sessionIdRef.current, {
+        text,
+        attachments: attachments.length ? attachments : undefined,
+      });
+      return;
+    }
+    setQueuedTurns((q) => [...q, turn]);
+  }
+
+  const removeQueuedTurn = (id: string) =>
+    setQueuedTurns((q) => q.filter((t) => t.id !== id));
+
+  /** Restore a queued turn back into the composer for editing. */
+  const editQueuedTurn = (turn: QueuedTurn) => {
+    setInput(turn.text);
+    setAttachments(turn.attachments);
+    removeQueuedTurn(turn.id);
+    inputRef.current?.focus();
+  };
+
+  /** Send a queued turn immediately: steer it into the live run (or dispatch
+   *  if the agent is somehow already idle), then drop it from the queue. */
+  const steerQueuedTurn = (turn: QueuedTurn) => {
+    removeQueuedTurn(turn.id);
+    if (running) {
+      void chatRunManager.steer(sessionIdRef.current, {
+        text: turn.text,
+        attachments: turn.attachments.length ? turn.attachments : undefined,
+      });
+    } else {
+      void dispatchTurn({ text: turn.text, attachments: turn.attachments });
+    }
+  };
 
   /** Deletes the currently open session entirely (removes it from the sidebar). */
   async function clearHistory() {
@@ -270,10 +465,198 @@ export function ChatPanel() {
    */
   function newChat() {
     setInput('');
+    setAttachments([]);
     const id = loadSession(null);
     void window.easyhost.chatHistory.setActive(id);
     inputRef.current?.focus();
   }
+
+  // Before the first message, the ChatGPT/Claude-style empty state centers
+  // the composer vertically in the canvas instead of docking it to the
+  // bottom edge under an empty transcript.
+  const isEmptyConversation = feed.length === 0 && !running;
+
+  const composer = (
+    <form
+      className={COMPOSER_COLUMN_FRAME_CLASS_NAME}
+      onSubmit={(e) => {
+        e.preventDefault();
+        submit('queue');
+      }}
+    >
+      {queuedTurns.length > 0 && (
+        <ComposerQueuedHeader
+          turns={queuedTurns}
+          onSteer={steerQueuedTurn}
+          onEdit={editQueuedTurn}
+          onRemove={removeQueuedTurn}
+        />
+      )}
+      <div className="mb-2 flex items-center gap-2">
+        <Select value={project} onValueChange={setProject}>
+          <SelectTrigger
+            size="sm"
+            className={COMPOSER_FOOTER_PICKER_TRIGGER_CLASS_NAME}
+            aria-label="Choose project"
+          >
+            <FolderIcon
+              aria-hidden
+              className="size-3.5 shrink-0 text-foreground"
+            />
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent side="top">
+            <SelectItem value={NO_PROJECT}>No project</SelectItem>
+            {projects.map((p) => (
+              <SelectItem key={p.id} value={p.id}>
+                {p.name}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <Select value={target} onValueChange={setTarget}>
+          <SelectTrigger
+            size="sm"
+            className={COMPOSER_FOOTER_PICKER_TRIGGER_CLASS_NAME}
+            aria-label="Choose target servers"
+          >
+            <ServerIcon
+              aria-hidden
+              className="size-3.5 shrink-0 text-foreground"
+            />
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent side="top">
+            <SelectItem value={ALL}>
+              {project === NO_PROJECT ? 'All servers' : 'All project servers'}
+            </SelectItem>
+            {scopedServers.map((s) => (
+              <SelectItem key={s.id} value={s.id}>
+                {s.name}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <ModelOptionsMenu />
+      </div>
+
+      <input
+        ref={fileInputRef}
+        type="file"
+        multiple
+        accept={ATTACH_ACCEPT}
+        className="hidden"
+        onChange={(e) => {
+          if (e.target.files) void addFiles(e.target.files);
+          e.target.value = ''; // allow re-picking the same file
+        }}
+      />
+
+      <div
+        className="composer overflow-hidden"
+        onDragOver={(e) => {
+          if (e.dataTransfer.types.includes('Files')) e.preventDefault();
+        }}
+        onDrop={(e) => {
+          if (e.dataTransfer.files.length) {
+            e.preventDefault();
+            void addFiles(e.dataTransfer.files);
+          }
+        }}
+      >
+        {attachments.length > 0 && (
+          <div className="flex flex-wrap gap-2 px-3 pt-2.5">
+            {attachments.map((att) => (
+              <AttachmentChip
+                key={att.id}
+                attachment={att}
+                onRemove={() => removeAttachment(att.id)}
+              />
+            ))}
+          </div>
+        )}
+        <div className={COMPOSER_EDITOR_PADDING_CLASS_NAME}>
+          <div className={COMPOSER_INPUT_ROW_CLASS_NAME}>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-xs"
+              className="size-7 shrink-0 rounded-full text-muted-foreground"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={attachments.length >= ATTACHMENT_LIMITS.maxCount}
+              aria-label="Attach files"
+              title="Attach images or files"
+            >
+              <PaperclipIcon aria-hidden className="size-4" />
+            </Button>
+            <textarea
+              ref={inputRef}
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                  e.preventDefault();
+                  // While a run streams: Cmd/Ctrl+Enter steers it now,
+                  // plain Enter queues for after it finishes (FCode model).
+                  submit(e.metaKey || e.ctrlKey ? 'steer' : 'queue');
+                }
+              }}
+              onPaste={(e) => {
+                const files = Array.from(e.clipboardData.files);
+                if (files.length) {
+                  e.preventDefault();
+                  void addFiles(files);
+                }
+              }}
+              placeholder={
+                running
+                  ? 'Queue a message (⌘↵ to steer now)…'
+                  : 'Ask anything…'
+              }
+              autoFocus
+              rows={1}
+              data-slot="composer-input"
+              className={COMPOSER_EDITOR_CLASS_NAME}
+            />
+
+            {/* While running: Stop is always available; a Queue button
+                appears once there's something to send. Idle: just Send. */}
+            {running && (
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-xs"
+                className="size-7 shrink-0 rounded-full text-muted-foreground"
+                onClick={() => chatRunManager.cancel(sessionId)}
+                aria-label="Stop generation"
+                title="Stop the current agent run"
+              >
+                <span
+                  aria-hidden="true"
+                  className="block size-2 rounded-[2px] bg-current"
+                />
+              </Button>
+            )}
+            <Button
+              type="submit"
+              variant="prominent"
+              size="icon-xs"
+              className="size-7 shrink-0 rounded-full sm:size-7"
+              disabled={!input.trim() && attachments.length === 0}
+              aria-label={running ? 'Queue message' : 'Send message'}
+              title={
+                running
+                  ? 'Queue this message (⌘↵ / Ctrl+↵ to steer the run now)'
+                  : 'Send message'
+              }
+            >
+              <ComposerSendArrowIcon aria-hidden className="size-5 shrink-0" />
+            </Button>
+          </div>
+        </div>
+      </div>
+    </form>
+  );
 
   return (
     <div className="flex h-full flex-col bg-background">
@@ -305,7 +688,7 @@ export function ChatPanel() {
             type="button"
             variant="ghost"
             size="icon-sm"
-            onClick={clearHistory}
+            onClick={() => setConfirmDelete(true)}
             disabled={running || feed.length === 0}
             aria-label="Delete this chat"
             title="Delete this chat from History"
@@ -315,118 +698,185 @@ export function ChatPanel() {
         </div>
       </header>
 
-      <AgentFeed
-        feed={feed}
-        error={error}
-        approval={approval}
-        onApprove={(approved) =>
-          void chatRunManager.respondApproval(sessionId, approved)
-        }
-        running={running}
-        tokens={tokens}
-      />
+      <AlertDialog open={confirmDelete} onOpenChange={setConfirmDelete}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete this chat?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This conversation will be removed from History permanently. This
+              can’t be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                setConfirmDelete(false);
+                void clearHistory();
+              }}
+            >
+              Delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
-      <form
-        className="bg-background px-4 pt-2 pb-4"
-        onSubmit={(e) => {
-          e.preventDefault();
-          send();
-        }}
-      >
-        <div className={COMPOSER_COLUMN_FRAME_CLASS_NAME}>
-          <div className="mb-2 flex items-center">
-            <Select value={target} onValueChange={setTarget}>
-              <SelectTrigger
-                size="sm"
-                className={COMPOSER_FOOTER_PICKER_TRIGGER_CLASS_NAME}
-                aria-label="Choose target servers"
-              >
-                <ServerIcon
-                  aria-hidden
-                  className="size-3.5 shrink-0 text-foreground"
-                />
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent side="top">
-                <SelectItem value={ALL}>All servers</SelectItem>
-                {servers.map((s) => (
-                  <SelectItem key={s.id} value={s.id}>
-                    {s.name}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-
-          <div className="composer overflow-hidden">
-            <div className={COMPOSER_EDITOR_PADDING_CLASS_NAME}>
-              <div className={COMPOSER_INPUT_ROW_CLASS_NAME}>
-                <textarea
-                  ref={inputRef}
-                  value={input}
-                  onChange={(e) => setInput(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' && !e.shiftKey) {
-                      e.preventDefault();
-                      void send();
-                    }
-                  }}
-                  placeholder="Ask anything…"
-                  disabled={running}
-                  autoFocus
-                  rows={1}
-                  data-slot="composer-input"
-                  className={COMPOSER_EDITOR_CLASS_NAME}
-                />
-
-                {running ? (
-                  <Button
-                    type="button"
-                    variant="prominent"
-                    size="icon-xs"
-                    className="size-7 shrink-0 rounded-full sm:size-7"
-                    onClick={() => chatRunManager.cancel(sessionId)}
-                    aria-label="Stop generation"
-                    title="Stop the current agent run"
-                  >
-                    <span
-                      aria-hidden="true"
-                      className="block size-2 rounded-[2px] bg-current"
-                    />
-                  </Button>
-                ) : (
-                  <Button
-                    type="submit"
-                    variant="prominent"
-                    size="icon-xs"
-                    className="size-7 shrink-0 rounded-full sm:size-7"
-                    disabled={!input.trim()}
-                    aria-label="Send message"
-                  >
-                    <ComposerSendArrowIcon
-                      aria-hidden
-                      className="size-5 shrink-0"
-                    />
-                  </Button>
-                )}
-              </div>
-            </div>
-          </div>
+      {isEmptyConversation ? (
+        <div className="flex flex-1 flex-col items-center justify-center px-4 pb-24">
+          <span className="skill-chip mb-4 flex size-10 items-center justify-center rounded-full">
+            <SidebarGlyph icon={SparklesIcon} variant="chrome" />
+          </span>
+          <h2 className="mb-1 text-sm font-semibold tracking-[-0.015em] text-ink">
+            What can I help you with?
+          </h2>
+          <p className="mb-6 max-w-sm text-center text-xs leading-relaxed text-muted-foreground/70">
+            Ask the agent to check on a server, deploy something, or fix an
+            issue.
+          </p>
+          {composer}
         </div>
-      </form>
+      ) : (
+        <>
+          <AgentFeed
+            feed={feed}
+            error={error}
+            approval={approval}
+            onApprove={(approved) =>
+              void chatRunManager.respondApproval(sessionId, approved)
+            }
+            onSubmitForm={(formId, values) =>
+              void chatRunManager.respondForm(sessionId, formId, values)
+            }
+            running={running}
+            tokens={tokens}
+          />
+          <div className="bg-background px-4 pt-2 pb-4">{composer}</div>
+        </>
+      )}
     </div>
   );
 }
 
-function buildAgentMessages(feed: FeedItem[], nextUserMessage: string) {
-  const prior = feed
-    .filter((item): item is Extract<FeedItem, { kind: 'text' }> => item.kind === 'text')
-    .map((item) => ({
-      role: item.role,
-      content: item.content.trim(),
-    }))
-    .filter((message) => message.content.length > 0);
-
-  return [...prior, { role: 'user' as const, content: nextUserMessage }].slice(-40);
+/**
+ * Queued-message header fused onto the top of the composer (FCode's
+ * ComposerQueuedHeader): one row per message waiting to send after the run
+ * finishes, each with Send-now (steer) / Edit / Delete.
+ */
+function ComposerQueuedHeader({
+  turns,
+  onSteer,
+  onEdit,
+  onRemove,
+}: {
+  turns: QueuedTurn[];
+  onSteer: (turn: QueuedTurn) => void;
+  onEdit: (turn: QueuedTurn) => void;
+  onRemove: (id: string) => void;
+}) {
+  return (
+    <div className="mb-2 overflow-hidden rounded-xl border border-border bg-secondary/40">
+      <div className="flex items-center gap-1.5 px-3 pt-2 pb-1">
+        <ClockIcon aria-hidden className="size-3 text-muted-foreground" />
+        <span className="text-[10px] font-medium tracking-[0.03em] text-muted-foreground uppercase">
+          {turns.length} queued · sends when the agent finishes
+        </span>
+      </div>
+      <div className="divide-y divide-border/60">
+        {turns.map((turn) => (
+          <div key={turn.id} className="group/q flex items-center gap-2 px-3 py-2">
+            <ComposerSendArrowIcon
+              aria-hidden
+              className="size-3.5 shrink-0 rotate-90 text-muted-foreground/60"
+            />
+            <span className="min-w-0 flex-1 truncate text-xs text-ink">
+              {turn.text || '(attachment)'}
+              {turn.attachments.length > 0 && (
+                <span className="ml-1.5 text-[10px] text-muted-foreground">
+                  · {turn.attachments.length} file
+                  {turn.attachments.length === 1 ? '' : 's'}
+                </span>
+              )}
+            </span>
+            <div className="flex shrink-0 items-center gap-0.5">
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="h-6 px-2 text-[11px] text-muted-foreground"
+                onClick={() => onSteer(turn)}
+                title="Send this now (steer the running agent)"
+              >
+                Send now
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="h-6 px-2 text-[11px] text-muted-foreground"
+                onClick={() => onEdit(turn)}
+                title="Edit this queued message"
+              >
+                Edit
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-sm"
+                className="size-6 text-muted-foreground/70"
+                onClick={() => onRemove(turn.id)}
+                aria-label="Remove queued message"
+                title="Remove"
+              >
+                <XIcon aria-hidden className="size-3.5" />
+              </Button>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
 }
+
+/** A staged attachment in the composer: image thumbnail or file glyph, name,
+ *  size, and a remove button. */
+function AttachmentChip({
+  attachment,
+  onRemove,
+}: {
+  attachment: ChatAttachment;
+  onRemove: () => void;
+}) {
+  return (
+    <div className="group/att relative flex items-center gap-2 rounded-lg border border-border bg-secondary/50 py-1 pl-1 pr-2">
+      {attachment.kind === 'image' && attachment.dataUrl ? (
+        <img
+          src={attachment.dataUrl}
+          alt={attachment.name}
+          className="size-8 shrink-0 rounded-md object-cover"
+        />
+      ) : (
+        <span className="flex size-8 shrink-0 items-center justify-center rounded-md bg-secondary">
+          <FileTextIcon aria-hidden className="size-4 text-muted-foreground" />
+        </span>
+      )}
+      <div className="min-w-0">
+        <p className="max-w-[10rem] truncate text-[11px] font-medium text-ink">
+          {attachment.name}
+        </p>
+        <p className="text-[10px] text-muted-foreground">
+          {formatBytes(attachment.size)}
+        </p>
+      </div>
+      <button
+        type="button"
+        onClick={onRemove}
+        aria-label={`Remove ${attachment.name}`}
+        className="ml-0.5 rounded-full p-0.5 text-muted-foreground/60 transition-colors hover:bg-accent hover:text-foreground"
+      >
+        <XIcon aria-hidden className="size-3.5" />
+      </button>
+    </div>
+  );
+}
+
 

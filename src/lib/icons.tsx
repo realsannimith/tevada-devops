@@ -1,4 +1,4 @@
-import { type CSSProperties, type FC, type SVGProps } from 'react';
+import { type CSSProperties, type FC, type SVGProps } from "react";
 import {
   IconAlertTriangle,
   IconArrowLeft,
@@ -8,6 +8,8 @@ import {
   IconCircleCheckFilled,
   IconChecklist,
   IconChevronRight,
+  IconCloudDownload,
+  IconCloudUpload,
   IconServer,
   IconCopy,
   IconCpu,
@@ -18,10 +20,16 @@ import {
   IconExternalLink,
   IconEye,
   IconEyeOff,
+  IconFolder,
+  IconFolderOpen,
+  IconFolderPlus,
   IconKey,
   IconLoader2,
   IconRefresh,
   IconMoon,
+  IconPaperclip,
+  IconPencil,
+  IconFileText,
   IconPin,
   IconPinFilled,
   IconPlayerPlay,
@@ -39,8 +47,8 @@ import {
   IconWifiOff,
   IconX,
   type TablerIcon,
-} from '@tabler/icons-react';
-import { CentralIcon, type CentralIconVariant } from '@/lib/central-icons';
+} from "@tabler/icons-react";
+import { CentralIcon, type CentralIconVariant } from "@/lib/central-icons";
 
 export type AppIcon = FC<SVGProps<SVGSVGElement>>;
 
@@ -50,15 +58,18 @@ function adaptIcon(Component: TablerIcon): AppIcon {
   };
 }
 
-function centralIconWrapper(name: string, variant?: CentralIconVariant): AppIcon {
+function centralIconWrapper(
+  name: string,
+  variant?: CentralIconVariant,
+): AppIcon {
   return function CentralIconWrapper({ className, style, ...rest }) {
-    const ariaLabelRaw = (rest as { ['aria-label']?: unknown })['aria-label'];
-    const label = typeof ariaLabelRaw === 'string' ? ariaLabelRaw : undefined;
+    const ariaLabelRaw = (rest as { ["aria-label"]?: unknown })["aria-label"];
+    const label = typeof ariaLabelRaw === "string" ? ariaLabelRaw : undefined;
     return (
       <CentralIcon
         name={name}
         variant={variant}
-        className={typeof className === 'string' ? className : undefined}
+        className={typeof className === "string" ? className : undefined}
         style={style as CSSProperties | undefined}
         label={label}
       />
@@ -74,10 +85,14 @@ export const CheckIcon = adaptIcon(IconCheck);
 export const ChecklistIcon = adaptIcon(IconChecklist);
 export const CircleIcon = adaptIcon(IconCircle);
 export const CircleCheckFilledIcon = adaptIcon(IconCircleCheckFilled);
+export const CloudUploadIcon = adaptIcon(IconCloudUpload);
+export const CloudDownloadIcon = adaptIcon(IconCloudDownload);
+/** Hollow rounded square — the unchecked-task marker in the todo list. */
+export const SquareIcon = adaptIcon(IconSquare);
 export const ChevronRightIcon = adaptIcon(IconChevronRight);
 export const ServerIcon = adaptIcon(IconServer);
-export const ClockIcon = centralIconWrapper('clock');
-export const ComposerSendArrowIcon = centralIconWrapper('arrow-up');
+export const ClockIcon = centralIconWrapper("clock");
+export const ComposerSendArrowIcon = centralIconWrapper("arrow-up");
 export const CopyIcon = adaptIcon(IconCopy);
 export const CpuIcon = adaptIcon(IconCpu);
 export const DeviceLaptopIcon = adaptIcon(IconDeviceLaptop);
@@ -90,6 +105,12 @@ export const Loader2Icon = adaptIcon(IconLoader2);
 export const MemoryIcon = adaptIcon(IconActivity);
 export const NetworkIcon = adaptIcon(IconDeviceSdCard);
 export const MoonIcon = adaptIcon(IconMoon);
+export const PaperclipIcon = adaptIcon(IconPaperclip);
+export const PencilIcon = adaptIcon(IconPencil);
+export const FileTextIcon = adaptIcon(IconFileText);
+export const FolderIcon = adaptIcon(IconFolder);
+export const FolderOpenIcon = adaptIcon(IconFolderOpen);
+export const FolderPlusIcon = adaptIcon(IconFolderPlus);
 export const PinIcon = adaptIcon(IconPin);
 export const PinFilledIcon = adaptIcon(IconPinFilled);
 export const PlayIcon = adaptIcon(IconPlayerPlay);
@@ -100,11 +121,11 @@ export const SparklesIcon = adaptIcon(IconSparkles);
 export const StopFilledIcon = adaptIcon(IconPlayerStopFilled);
 export const StopIcon = adaptIcon(IconSquare);
 export const SunIcon = adaptIcon(IconSun);
-export const TerminalIcon = centralIconWrapper('console');
+export const TerminalIcon = centralIconWrapper("console");
 export const TextWrapIcon = adaptIcon(IconTextWrap);
 export const TrashIcon = adaptIcon(IconTrash);
 export const WifiIcon = adaptIcon(IconWifi);
 export const WifiOffIcon = adaptIcon(IconWifiOff);
 export const WizardsIcon = adaptIcon(IconTool);
-export const ChatBubbleIcon = centralIconWrapper('bubble-text');
+export const ChatBubbleIcon = centralIconWrapper("bubble-text");
 export const XIcon = adaptIcon(IconX);

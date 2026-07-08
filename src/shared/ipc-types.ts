@@ -4,6 +4,7 @@
  * appears in these types: credentials cross IPC only once (renderer -> main on
  * add/update) and are never echoed back.
  */
+import type { EffortLevel, ProviderId } from './providers';
 
 // ---------------------------------------------------------------------------
 // Domain types
@@ -20,6 +21,28 @@ export type ServerProfile = {
   username: string;
   authType: AuthType;
   createdAt: number;
+  /**
+   * Projects this server belongs to. Absent/empty = unassigned. A server is
+   * usually in one project, but may be in several (user's choice) — hence an
+   * array rather than a single id. See {@link Project}.
+   */
+  projectIds?: string[];
+};
+
+/**
+ * An in-app project: a local grouping of servers plus per-project "memory"
+ * (notes) that gets injected into the agent's context for every chat tagged to
+ * the project. Purely local — persisted in easyhost.json, no secret material.
+ */
+export type Project = {
+  id: string;
+  name: string;
+  /** Optional accent colour (hex) for the sidebar/history tag. */
+  color?: string;
+  /** Free-form notes auto-injected into the agent's system context. */
+  memory?: string;
+  createdAt: number;
+  updatedAt: number;
 };
 
 /** Secret material for a profile — only ever travels renderer -> main. */
@@ -56,6 +79,16 @@ export type AppSettings = {
    * dimmed predictions before the server confirms them, the way Mosh/Termius do.
    */
   localEcho: boolean;
+  /** Active LLM provider. Its API key lives in the encrypted secret store. */
+  aiProvider: ProviderId;
+  /** Model id sent to the provider (curated pick or user-typed custom id). */
+  aiModel: string;
+  /** Endpoint base URL — used only when aiProvider is 'openai-compatible'. */
+  aiBaseUrl: string;
+  /** Reasoning effort, translated to each provider's own knob at run time. */
+  aiEffort: EffortLevel;
+  /** Extended thinking / reasoning on or off (where the provider supports it). */
+  aiThinking: boolean;
 };
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -63,7 +96,19 @@ export const DEFAULT_SETTINGS: AppSettings = {
   agentMaxSteps: 50,
   pollIntervalMs: 4000,
   localEcho: true,
+  aiProvider: 'google',
+  aiModel: 'gemini-3.5-flash',
+  aiBaseUrl: '',
+  aiEffort: 'medium',
+  aiThinking: true,
 };
+
+/**
+ * Per-provider API key presence, for the Settings UI. `stored` = a key is in
+ * the encrypted store; `env` = an environment-variable fallback would apply.
+ * The key material itself never crosses IPC back to the renderer.
+ */
+export type AiKeyStatus = Record<ProviderId, { stored: boolean }>;
 
 // ---------------------------------------------------------------------------
 // Monitoring
@@ -238,6 +283,11 @@ export type ExecResult = {
 
 export type AgentEvent =
   | { type: 'text-delta'; text: string }
+  /** A chunk of the model's thinking stream (extended thinking / reasoning
+   *  summaries) — rendered live in a collapsible "Thinking" card. */
+  | { type: 'reasoning-delta'; text: string }
+  /** One thinking block finished; a later block appends as a new paragraph. */
+  | { type: 'reasoning-end' }
   | {
       type: 'tool-start';
       toolCallId: string;
@@ -250,6 +300,9 @@ export type AgentEvent =
   /** The agent's task checklist changed (updateTodos tool) — carries the full
    *  current list, which replaces whatever the transcript showed before. */
   | { type: 'todos'; todos: TodoItem[] }
+  /** Steer messages that arrived after the run's last step (couldn't be
+   *  injected). The renderer resends them as a fresh turn so they're not lost. */
+  | { type: 'steer-unconsumed'; items: SteerItem[] }
   | {
       type: 'approval-required';
       approvalId: string;
@@ -257,6 +310,9 @@ export type AgentEvent =
       command: string;
       reason: string;
     }
+  /** The agent asked the user to fill in a form; the run pauses until they
+   *  submit or cancel it. Carries the full spec so the renderer can draw it. */
+  | { type: 'form-required'; form: AgentFormSpec }
   | { type: 'step'; index: number }
   | { type: 'usage'; totalTokens: number }
   | { type: 'done'; finalText: string }
@@ -267,10 +323,59 @@ export type AgentEvent =
 // Persisted chat history
 // ---------------------------------------------------------------------------
 
+/** A file/image the user attached to a message. Images go to the model as
+ *  vision input; text files are inlined into the prompt so the agent can read
+ *  (and deploy) them. */
+export type ChatAttachment = {
+  id: string;
+  name: string;
+  /** MIME type, e.g. 'image/png' or 'text/yaml'. */
+  mediaType: string;
+  kind: 'image' | 'text';
+  /** Byte size of the original file. */
+  size: number;
+  /** Images only: 'data:<mime>;base64,…'. Absent for text files. */
+  dataUrl?: string;
+  /** Text files only: the (capped) file contents. Absent for images. */
+  text?: string;
+};
+
+/** Composer attachment limits, enforced in the renderer before a file is added. */
+export const ATTACHMENT_LIMITS = {
+  maxCount: 5,
+  maxImageBytes: 5 * 1024 * 1024, // 5 MB
+  maxTextBytes: 128 * 1024, // 128 KB
+} as const;
+
+/**
+ * How a user message was dispatched relative to a running agent turn:
+ * 'queue' waits for the current run to finish; 'steer' is injected into the
+ * live run to redirect it mid-flight. Absent = a normal send (no run active).
+ */
+export type TurnDispatchMode = 'queue' | 'steer';
+
 export type ChatTextHistoryItem = {
   kind: 'text';
   id: string;
   role: 'user' | 'assistant';
+  content: string;
+  /** Files/images the user attached to this message (user turns only). */
+  attachments?: ChatAttachment[];
+  /** Set to 'steer' when this user message was injected mid-run — drives the
+   *  "Steering" chip in the transcript. */
+  dispatchMode?: TurnDispatchMode;
+};
+
+/**
+ * The model's thinking stream for one turn (extended thinking / reasoning
+ * summaries — Anthropic, Codex, Gemini). Rendered as a quiet collapsible
+ * "Thinking" card ahead of the answer, Codex/Claude-Code style, and persisted
+ * so reopening the conversation still shows how the model reasoned. Never sent
+ * back to the model (feedToMessages only forwards 'text' items).
+ */
+export type ChatReasoningHistoryItem = {
+  kind: 'reasoning';
+  id: string;
   content: string;
 };
 
@@ -305,10 +410,77 @@ export type ChatTodoHistoryItem = {
   todos: TodoItem[];
 };
 
+// ---------------------------------------------------------------------------
+// Agent-requested forms (generative UI) — the agent can render an interactive
+// form in the chat and wait for the user to fill it in, instead of asking for
+// each value in plain text. First use: configuring a custom domain for a
+// deployed service (requestDomainSetup tool).
+// ---------------------------------------------------------------------------
+
+export type FormFieldType = 'text' | 'number' | 'select' | 'toggle' | 'password';
+
+export type FormField = {
+  key: string;
+  label: string;
+  type: FormFieldType;
+  placeholder?: string;
+  /** Options for a 'select' field. */
+  options?: string[];
+  required?: boolean;
+  /** Prefilled value. Toggles use 'true' / 'false'. */
+  defaultValue?: string;
+  /** One-line hint shown under the field. */
+  help?: string;
+};
+
+/** An in-form DNS setup guide — renders a live A-record table + steps so the
+ *  user can point their domain at this server before finishing. */
+export type DnsGuideConfig = {
+  /** The IP the DNS A-record should point at (this server's public IP). */
+  serverIp: string;
+  /** Which form field holds the domain (default 'domain'); the record NAME is
+   *  computed live from its value. */
+  domainField?: string;
+  /** Which toggle field enables the www. variant (default 'www'). */
+  wwwField?: string;
+};
+
+/** The spec the agent (via a tool) hands the renderer to draw a form. */
+export type AgentFormSpec = {
+  formId: string;
+  title: string;
+  description?: string;
+  submitLabel?: string;
+  fields: FormField[];
+  /** When set, the form shows a live DNS setup guide (domain forms). */
+  dnsGuide?: DnsGuideConfig;
+};
+
+/**
+ * One form in the transcript. Starts 'pending' (interactive); once the user
+ * submits or cancels it becomes a read-only record carrying their `values`, so
+ * reopening the conversation shows what was entered.
+ */
+export type ChatFormHistoryItem = {
+  kind: 'form';
+  formId: string;
+  title: string;
+  description?: string;
+  submitLabel?: string;
+  fields: FormField[];
+  status: 'pending' | 'submitted' | 'cancelled';
+  /** Submitted values, keyed by field.key (toggles as 'true'/'false'). */
+  values?: Record<string, string>;
+  /** Present on domain forms — drives the in-form DNS setup guide. */
+  dnsGuide?: DnsGuideConfig;
+};
+
 export type ChatHistoryItem =
   | ChatTextHistoryItem
+  | ChatReasoningHistoryItem
   | ChatToolHistoryItem
-  | ChatTodoHistoryItem;
+  | ChatTodoHistoryItem
+  | ChatFormHistoryItem;
 
 /** Sessions record both free-form agent chats and wizard (playbook) runs. */
 export type ChatSessionKind = 'chat' | 'wizard';
@@ -343,8 +515,17 @@ export type ChatSession = {
   status?: ChatSessionStatus;
   /** Pinned sessions sort to the top of History and survive background re-saves. */
   pinned?: boolean;
+  /** Total model tokens reported by the session's last run — shown at the end
+   *  of the transcript once the stream has finished. */
+  tokens?: number;
   items: ChatHistoryItem[];
   targetServerId?: string | null;
+  /**
+   * Project this chat is tagged to (null/absent = no project). Scopes the chat
+   * in History and hard-limits the agent to the project's servers. See
+   * {@link Project}.
+   */
+  projectId?: string | null;
   createdAt: number;
   updatedAt: number;
 };
@@ -451,6 +632,38 @@ export type GithubAuthEvent =
   | { phase: 'success'; account: GithubAccount }
   | { phase: 'error'; error: string };
 
+// ---------------------------------------------------------------------------
+// Codex (ChatGPT subscription) account — the OAuth tokens live encrypted in
+// secrets.ts; only this non-secret metadata is stored/shown. See main/codexAuth.ts.
+// ---------------------------------------------------------------------------
+
+export type CodexAccount = {
+  /** ChatGPT account email from the id_token, when present. */
+  email?: string;
+  /** ChatGPT account id (sent as the chatgpt-account-id header on model calls). */
+  accountId?: string;
+  /** Raw plan slug from the id_token (free|plus|pro|team|business|enterprise|edu|…). */
+  planType?: string;
+  /** Human label for the plan, e.g. "ChatGPT Plus". */
+  planLabel?: string;
+  connectedAt: number;
+  /** Set when the refresh token expired — the user must sign in again. */
+  needsReauth?: boolean;
+};
+
+export type CodexStatus = {
+  connected: boolean;
+  account?: CodexAccount;
+  /** False when OS secure storage is unavailable (login can't be stored). */
+  secretsAvailable: boolean;
+};
+
+/** Pushed over evtCodexAuth while a ChatGPT sign-in is in progress. */
+export type CodexAuthEvent =
+  | { phase: 'pending' }
+  | { phase: 'success'; account: CodexAccount }
+  | { phase: 'error'; error: string };
+
 export type GithubRepo = {
   fullName: string;
   private: boolean;
@@ -465,6 +678,58 @@ export type GithubReposResult =
 
 export type GithubCloneResult =
   | { ok: true; path: string }
+  | { ok: false; error: string };
+
+// ---------------------------------------------------------------------------
+// Google Drive app-data sync
+// ---------------------------------------------------------------------------
+
+export type GoogleDriveAccount = {
+  email: string;
+  name?: string;
+  picture?: string;
+  connectedAt: number;
+  accessTokenExpiresAt?: number;
+  lastSyncedAt?: number;
+  lastSyncBytes?: number;
+  lastSyncFileCount?: number;
+  lastSyncHash?: string;
+  syncError?: string;
+  needsReauth?: boolean;
+};
+
+export type GoogleDriveStatus = {
+  connected: boolean;
+  account?: GoogleDriveAccount;
+  clientConfigured: boolean;
+  secretsAvailable: boolean;
+  syncInProgress: boolean;
+  /**
+   * True right after connecting when a backup already exists on Drive and the
+   * user hasn't chosen restore-vs-overwrite yet. Auto-sync is suppressed while
+   * this is set so a reconnect can't clobber the cloud backup.
+   */
+  remoteBackupPending?: boolean;
+  restoreInProgress?: boolean;
+};
+
+export type GoogleDriveRestoreResult =
+  | { ok: true; fileCount: number; bytes: number }
+  | { ok: false; error: string };
+
+export type GoogleDriveAuthEvent =
+  | { phase: 'pending' }
+  | { phase: 'success'; account: GoogleDriveAccount }
+  | { phase: 'error'; error: string };
+
+export type GoogleDriveSyncResult =
+  | {
+      ok: true;
+      skipped?: boolean;
+      lastSyncedAt?: number;
+      bytes?: number;
+      fileCount?: number;
+    }
   | { ok: false; error: string };
 
 // ---------------------------------------------------------------------------
@@ -626,6 +891,11 @@ export const IPC = {
   serversUpdate: 'servers:update',
   serversRemove: 'servers:remove',
   serversTest: 'servers:test',
+  // projects (invoke) — local server grouping + per-project agent memory
+  projectsList: 'projects:list',
+  projectsAdd: 'projects:add',
+  projectsUpdate: 'projects:update',
+  projectsRemove: 'projects:remove',
   // keys (invoke)
   keysGenerate: 'keys:generate',
   // ssh (invoke)
@@ -643,16 +913,28 @@ export const IPC = {
   agentStart: 'agent:start',
   agentCancel: 'agent:cancel',
   agentApprove: 'agent:approve',
+  agentRespondForm: 'agent:respond-form',
+  agentSteer: 'agent:steer',
   agentModel: 'agent:model',
   // chat history (invoke) — session-based, mirrors FCode's thread list
   chatHistoryList: 'chat-history:list',
   chatHistoryUpsert: 'chat-history:upsert',
   chatHistorySetActive: 'chat-history:set-active',
   chatHistorySetPinned: 'chat-history:set-pinned',
+  chatHistoryRename: 'chat-history:rename',
   chatHistoryDelete: 'chat-history:delete',
   // settings (invoke)
   settingsGet: 'settings:get',
   settingsSet: 'settings:set',
+  // ai provider keys (invoke) — key travels renderer -> main once, never back
+  aiKeySet: 'ai:key-set',
+  aiKeyClear: 'ai:key-clear',
+  aiKeyStatus: 'ai:key-status',
+  // codex (ChatGPT subscription) sign-in (invoke) — tokens never cross back
+  codexStatus: 'codex:status',
+  codexLogin: 'codex:login',
+  codexCancel: 'codex:cancel',
+  codexLogout: 'codex:logout',
   // playbooks (invoke)
   playbooksList: 'playbooks:list',
   // artifacts (invoke)
@@ -684,6 +966,14 @@ export const IPC = {
   githubAuthorizeServer: 'github:authorize-server',
   githubDeauthorizeServer: 'github:deauthorize-server',
   githubClone: 'github:clone',
+  // google drive app-data sync (invoke)
+  googleDriveStatus: 'google-drive:status',
+  googleDriveLogin: 'google-drive:login',
+  googleDriveCancel: 'google-drive:cancel',
+  googleDriveDisconnect: 'google-drive:disconnect',
+  googleDriveSyncNow: 'google-drive:sync-now',
+  googleDriveRestore: 'google-drive:restore',
+  googleDriveKeepLocal: 'google-drive:keep-local',
   // alerts / telegram (invoke)
   alertsStatus: 'alerts:status',
   alertsConnectToken: 'alerts:connect-token',
@@ -701,6 +991,9 @@ export const IPC = {
   evtMonitorStats: 'monitor:stats',
   evtAgentEvent: 'agent:event',
   evtGithubAuth: 'github:auth-event',
+  evtGoogleDriveAuth: 'google-drive:auth-event',
+  evtGoogleDriveStatus: 'google-drive:status-changed',
+  evtCodexAuth: 'codex:auth-event',
   evtChatHistory: 'chat-history:changed',
   evtAlert: 'alerts:event',
 } as const;
@@ -729,9 +1022,25 @@ export type ServerWithStatus = ServerProfile & { status: ConnStatus };
 
 export type OkResult = { ok: true } | { ok: false; error: string };
 
+/** One steer message injected into a running agent turn (text + attachments). */
+export type SteerItem = {
+  text: string;
+  attachments?: ChatAttachment[];
+};
+
 export type AgentStartRequest = {
   messages: { role: 'user' | 'assistant'; content: string }[];
   serverIds?: string[];
+  /** Project this chat is tagged to. Hard-scopes the run to the project's
+   *  servers and injects the project's memory into the system prompt. */
+  projectId?: string | null;
   playbookId?: string;
   playbookValues?: Record<string, string>;
+  /** Files/images attached to the final user message — applied to the last
+   *  user turn as multimodal content when the model is called. */
+  attachments?: ChatAttachment[];
+  /** The open session's current task list, sent on a follow-up turn so the
+   *  agent continues the same plan instead of forgetting earlier tasks — the
+   *  transcript only replays text messages, not todo items. */
+  todos?: TodoItem[];
 };

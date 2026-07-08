@@ -1,28 +1,206 @@
 /**
- * DevOps agent — runs in Electron's MAIN process (Node.js). The Gemini API key and
- * the AI SDK never reach the renderer; the renderer drives runs over IPC and
+ * DevOps agent — runs in Electron's MAIN process (Node.js). The provider API key
+ * and the AI SDK never reach the renderer; the renderer drives runs over IPC and
  * receives streamed AgentEvents.
  *
  * A run is fire-and-forget: startAgentRun kicks off streaming and returns; progress
  * (text deltas, tool activity, approvals) is pushed to the renderer via the `emit`
  * callback. Runs are cancellable via an AbortController registry.
+ *
+ * This module stays free of Electron imports (it has a vitest suite) — the
+ * caller (main/ipc.ts) resolves the provider config + API key and passes it in.
  */
-import { ToolLoopAgent, stepCountIs } from 'ai';
+import {
+  ToolLoopAgent,
+  stepCountIs,
+  type JSONValue,
+  type LanguageModel,
+  type ModelMessage,
+} from 'ai';
 import { createGoogleGenerativeAI } from '@ai-sdk/google';
-import { AgentEvent } from '../shared/ipc-types';
+import { createAnthropic } from '@ai-sdk/anthropic';
+import { createOpenAI } from '@ai-sdk/openai';
+import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
+import { AgentEvent, SteerItem, TodoItem } from '../shared/ipc-types';
+import { EffortLevel, providerLabel, ProviderId } from '../shared/providers';
+import { CODEX_BACKEND_URL, CODEX_ORIGINATOR } from '../main/codexAuthCore';
 import { AgentToolContext, buildTools } from './tools';
+import { injectSteerMessages } from './attachments';
 import { buildSkillTool, loadSkills, skillsPromptSection } from './skills';
 
-export type ChatMessage = { role: 'user' | 'assistant'; content: string };
+/** A turn sent to the model. Content may be plain text or multimodal parts
+ *  (images + inlined files) — see agent/attachments.ts. */
+export type ChatMessage = ModelMessage;
 
-const MODEL_ID = process.env.AGENT_MODEL ?? 'gemini-3.5-flash';
+/** Resolved provider config for one run — key/baseUrl already looked up by main. */
+export type AgentModelConfig = {
+  provider: ProviderId;
+  modelId: string;
+  apiKey?: string;
+  /** Endpoint base URL — only for 'openai-compatible'. */
+  baseUrl?: string;
+  /** ChatGPT account id — only for 'codex' (sent as the chatgpt-account-id header). */
+  codexAccountId?: string;
+  /** App-level reasoning effort, translated per provider in buildProviderOptions. */
+  effort: EffortLevel;
+  /** Extended thinking / reasoning on or off. */
+  thinking: boolean;
+};
 
-function resolveApiKey(): string | undefined {
-  return (
-    process.env.GOOGLE_GENERATIVE_AI_API_KEY ??
-    process.env.GEMINI_API_KEY ??
-    process.env.GOOGLE_API_KEY
-  );
+/**
+ * Fetch wrapper for the Codex (ChatGPT-subscription) backend. The
+ * chatgpt.com/backend-api/codex/responses endpoint requires `store: false`
+ * (it won't persist responses server-side); we set that via providerOptions but
+ * also enforce it here defensively so a Responses-body shape change can't send
+ * `store: true` and get rejected. Never throws on a parse miss — it just
+ * forwards the request unchanged.
+ */
+const codexFetch: typeof fetch = async (input, init) => {
+  if (init?.body && typeof init.body === 'string') {
+    try {
+      const body = JSON.parse(init.body) as Record<string, unknown>;
+      if (body.store !== false) {
+        body.store = false;
+        init = { ...init, body: JSON.stringify(body) };
+      }
+    } catch {
+      /* not JSON (or already a stream) — forward untouched */
+    }
+  }
+  return fetch(input, init);
+};
+
+export function createModel(cfg: AgentModelConfig): LanguageModel {
+  switch (cfg.provider) {
+    case 'google':
+      return createGoogleGenerativeAI({ apiKey: cfg.apiKey })(cfg.modelId);
+    case 'anthropic':
+      return createAnthropic({ apiKey: cfg.apiKey })(cfg.modelId);
+    case 'openai':
+      return createOpenAI({ apiKey: cfg.apiKey })(cfg.modelId);
+    case 'openrouter':
+      return createOpenAICompatible({
+        name: 'openrouter',
+        baseURL: 'https://openrouter.ai/api/v1',
+        apiKey: cfg.apiKey,
+        headers: { 'X-Title': 'Tevada DevOps' },
+      })(cfg.modelId);
+    case 'xai':
+      return createOpenAICompatible({
+        name: 'xai',
+        baseURL: 'https://api.x.ai/v1',
+        apiKey: cfg.apiKey,
+      })(cfg.modelId);
+    case 'groq':
+      return createOpenAICompatible({
+        name: 'groq',
+        baseURL: 'https://api.groq.com/openai/v1',
+        apiKey: cfg.apiKey,
+      })(cfg.modelId);
+    case 'openai-compatible':
+      return createOpenAICompatible({
+        name: 'custom',
+        baseURL: cfg.baseUrl ?? '',
+        apiKey: cfg.apiKey,
+      })(cfg.modelId);
+    case 'codex':
+      // ChatGPT subscription: the access token calls OpenAI's Codex backend
+      // (Responses API) directly — no OpenAI API key needed. Uses the official
+      // OpenAI provider (so providerOptions live under the `openai` key) pointed
+      // at the ChatGPT backend with the subscription bearer + account headers.
+      return createOpenAI({
+        baseURL: CODEX_BACKEND_URL,
+        apiKey: cfg.apiKey,
+        headers: {
+          'chatgpt-account-id': cfg.codexAccountId ?? '',
+          'OpenAI-Beta': 'responses=experimental',
+          originator: CODEX_ORIGINATOR,
+          session_id: globalThis.crypto?.randomUUID?.() ?? '',
+        },
+        fetch: codexFetch,
+      }).responses(cfg.modelId);
+  }
+}
+
+type ProviderOptions = Record<string, Record<string, JSONValue>>;
+
+/**
+ * Translate the app-level effort/thinking settings into each provider's own
+ * knob (verified against the installed SDK option schemas):
+ * - Anthropic: `effort` (low…max) + `thinking` adaptive/disabled
+ * - OpenAI: `reasoningEffort` (minimal…xhigh)
+ * - Gemini: `thinkingConfig.thinkingLevel` (3.x) / `.thinkingBudget` (2.5)
+ * - OpenRouter & custom endpoints: `reasoningEffort` → `reasoning_effort`
+ */
+export function buildProviderOptions(cfg: AgentModelConfig): ProviderOptions {
+  const { effort, thinking } = cfg;
+  switch (cfg.provider) {
+    case 'anthropic': {
+      // Fable-tier models have thinking always on and reject an explicit
+      // "disabled" — omit the field there instead of sending it.
+      const alwaysThinks = cfg.modelId.includes('fable') || cfg.modelId.includes('mythos');
+      return {
+        anthropic: {
+          effort,
+          ...(thinking
+            ? { thinking: { type: 'adaptive' } }
+            : alwaysThinks
+              ? {}
+              : { thinking: { type: 'disabled' } }),
+        },
+      };
+    }
+    case 'openai':
+      return {
+        openai: {
+          reasoningEffort: thinking ? (effort === 'max' ? 'xhigh' : effort) : 'minimal',
+        },
+      };
+    case 'codex':
+      // Same `openai` option key (createOpenAI). The ChatGPT backend needs
+      // store:false, and because responses aren't stored server-side we must
+      // request encrypted reasoning so it round-trips in `input` across turns.
+      return {
+        openai: {
+          store: false,
+          include: ['reasoning.encrypted_content'],
+          reasoningEffort: thinking ? (effort === 'max' ? 'xhigh' : effort) : 'minimal',
+          reasoningSummary: 'auto',
+        },
+      };
+    case 'google': {
+      if (!thinking) {
+        // 2.5 Pro cannot fully disable thinking — 128 is its minimum budget.
+        const budget = cfg.modelId === 'gemini-2.5-pro' ? 128 : 0;
+        return cfg.modelId.startsWith('gemini-3')
+          ? { google: { thinkingConfig: { thinkingLevel: 'minimal' } } }
+          : { google: { thinkingConfig: { thinkingBudget: budget } } };
+      }
+      if (cfg.modelId.startsWith('gemini-3')) {
+        const level = effort === 'low' ? 'low' : effort === 'medium' ? 'medium' : 'high';
+        return { google: { thinkingConfig: { thinkingLevel: level } } };
+      }
+      // Gemini 2.5 takes a token budget instead of a named level.
+      const budget = effort === 'low' ? 2048 : effort === 'medium' ? 8192 : 24576;
+      return { google: { thinkingConfig: { thinkingBudget: budget } } };
+    }
+    case 'openrouter':
+    case 'xai':
+    case 'groq':
+    case 'openai-compatible': {
+      // Sent as `reasoning_effort` on the wire; the endpoint normalizes it for
+      // the underlying model (reasoning models honor it, others ignore it).
+      // Only low/medium/high are portable. When thinking is off we omit it —
+      // there is no universal "off" on this path. The options key must match
+      // the `name` passed to createOpenAICompatible in createModel.
+      if (!thinking) return {};
+      const key = cfg.provider === 'openai-compatible' ? 'custom' : cfg.provider;
+      const portable = effort === 'low' || effort === 'medium' ? effort : 'high';
+      return { [key]: { reasoningEffort: portable } };
+    }
+    default:
+      return {};
+  }
 }
 
 const SYSTEM_PROMPT = [
@@ -52,57 +230,170 @@ const SYSTEM_PROMPT = [
   'Planning & task list:',
   '- For any job with more than ~3 steps (deploys, security audits, hardening, migrations), call updateTodos FIRST to lay out the plan as a checklist the user can watch, then update it as you go: mark exactly one item in_progress while you work it, flip it to completed the instant it is done, and keep the rest pending. Skip the checklist for simple one- or two-step requests.',
   '',
+  'Collecting input with on-screen forms:',
+  '- When you need several related values from the user to do a job, prefer an on-screen form over asking for each value in plain text — it is far easier for a non-expert. For pointing a domain / custom URL at a service, call requestDomainSetup (it renders the domain form and returns the values); do not ask for the domain, port, HTTPS choice or email in chat. Load the setup-domain skill for the full flow.',
+  '- For scheduling database backups, call requestDatabaseBackupSetup (load the setup-database-backup skill for the full flow). For connecting S3-compatible object storage — image/file uploads for an app, or off-site backup copies — call requestS3StorageSetup (load the setup-s3-storage skill). NEVER ask the user to paste access keys or secrets into chat: the form collects them masked, and you write them straight to a root-only file without ever repeating them.',
+  '',
   'Verification & reporting:',
   '- After every milestone, VERIFY it actually works (curl -sSI localhost, systemctl is-active, a real client query for databases) before declaring success.',
   '- Give each runCommand/runScript a clear plain-English `description` — the user watches these to understand what is happening.',
   '- Finish with a plain-language summary a non-expert can act on: what you set up, exact URLs / connection strings / credentials they need to copy, how to try it, and any follow-ups (e.g. DNS records to add, ports you opened). Avoid jargon; explain any term you must use.',
 ].join('\n');
 
-type RunHandle = { abort: AbortController };
-const runs = new Map<string, RunHandle>();
-
-export function hasApiKey(): boolean {
-  return !!resolveApiKey();
+/**
+ * Remind the model of the task list it already started, so a follow-up turn
+ * ("continue", "keep going") keeps every earlier task instead of forgetting
+ * them. The transcript only sends TEXT back to the model — todo items are
+ * stripped — so without this the model would start its plan from scratch.
+ * Mirrors RooCode, which re-injects the current todo list every turn.
+ */
+export function buildTodoReminder(todos?: TodoItem[]): string {
+  if (!todos || todos.length === 0) return '';
+  const lines = todos.map((t) => {
+    const mark =
+      t.status === 'completed'
+        ? '[x]'
+        : t.status === 'in_progress'
+          ? '[~]'
+          : '[ ]';
+    return `${mark} ${t.text}`;
+  });
+  return [
+    '',
+    '',
+    'Current task list (the plan you already started earlier in this conversation):',
+    ...lines,
+    'When you call updateTodos, you MUST include ALL of these items (keep their exact text and their completed/in-progress states) plus any changes — the tool REPLACES the whole list, so leaving an item out deletes it. Do not re-do tasks already marked [x] completed; continue from the first item that is not yet done.',
+  ].join('\n');
 }
 
-export const agentModel = MODEL_ID;
+type RunHandle = {
+  abort: AbortController;
+  /** Steer messages waiting to be injected at the next step boundary. */
+  steerQueue: SteerItem[];
+};
+const runs = new Map<string, RunHandle>();
+
+/**
+ * Push a steer message into a running turn. It is injected as a user message
+ * before the agent's next reasoning step (via prepareStep), redirecting the run
+ * without aborting the work in progress. Returns whether the run was live and
+ * accepted it — if not (the run already ended), the caller starts a fresh turn.
+ */
+export function steerAgentRun(runId: string, items: SteerItem[]): boolean {
+  const handle = runs.get(runId);
+  if (!handle) return false;
+  handle.steerQueue.push(...items);
+  return true;
+}
 
 export type StartAgentRunOptions = {
   runId: string;
   messages: ChatMessage[];
   maxSteps: number;
+  modelConfig: AgentModelConfig;
   toolContext: AgentToolContext;
   emit: (event: AgentEvent) => void;
+  /** The session's current task list, so a continued run keeps earlier tasks. */
+  todos?: TodoItem[];
+  /**
+   * Project context preamble injected into the system prompt when the chat is
+   * tagged to a project: the project's name, its "memory" notes, and the servers
+   * the run is scoped to. Built in main (store-aware) and passed in so this file
+   * stays Electron-free. See {@link buildProjectContext}.
+   */
+  projectContext?: string;
 };
+
+/**
+ * Compose the project-memory preamble folded into the system prompt for a
+ * project-scoped chat. Kept here (next to buildTodoReminder) so both live
+ * beside the prompt they extend, but the caller supplies the raw strings.
+ */
+export function buildProjectContext(input: {
+  name: string;
+  memory?: string;
+  serverNames: string[];
+}): string {
+  const lines = [
+    '',
+    '',
+    `This chat is scoped to the project "${input.name}". You may ONLY operate on this project's servers — every other server is off-limits and the tools will refuse it.`,
+  ];
+  if (input.serverNames.length > 0) {
+    lines.push(`Project servers: ${input.serverNames.join(', ')}.`);
+  } else {
+    lines.push(
+      'This project has no servers yet — ask the user to add one before running remote commands.',
+    );
+  }
+  const memory = input.memory?.trim();
+  if (memory) {
+    lines.push('', 'Project memory (notes the user wants you to always know):', memory);
+  }
+  return lines.join('\n');
+}
 
 /**
  * Start a streaming agent run. Returns immediately; progress arrives via emit.
  */
 export function startAgentRun(opts: StartAgentRunOptions): void {
-  const { runId, messages, maxSteps, toolContext, emit } = opts;
+  const { runId, messages, maxSteps, modelConfig, toolContext, emit } = opts;
 
-  if (!resolveApiKey()) {
+  if (!modelConfig.apiKey) {
     emit({
       type: 'error',
       message:
-        'No Google API key found. Add GOOGLE_GENERATIVE_AI_API_KEY to your .env file and restart the app.',
+        modelConfig.provider === 'codex'
+          ? 'Not signed in to ChatGPT (or the session expired). Open Settings → Codex and sign in with your ChatGPT subscription.'
+          : `No API key set for ${providerLabel(modelConfig.provider)}. Open Settings → AI Provider to add one.`,
+    });
+    emit({ type: 'done', finalText: '' });
+    return;
+  }
+  if (modelConfig.provider === 'openai-compatible' && !modelConfig.baseUrl) {
+    emit({
+      type: 'error',
+      message:
+        'No base URL set for the OpenAI-compatible provider. Open Settings → AI Provider and enter your endpoint URL.',
+    });
+    emit({ type: 'done', finalText: '' });
+    return;
+  }
+  if (!modelConfig.modelId) {
+    emit({
+      type: 'error',
+      message: 'No model selected. Open Settings → AI Provider and pick a model.',
     });
     emit({ type: 'done', finalText: '' });
     return;
   }
 
   const abort = new AbortController();
-  runs.set(runId, { abort });
+  const steerQueue: SteerItem[] = [];
+  runs.set(runId, { abort, steerQueue });
 
-  const google = createGoogleGenerativeAI({ apiKey: resolveApiKey() });
+  // Thread this run's cancellation into every remote exec so Stop closes the
+  // in-flight SSH command's channel, not just the model stream. Without this,
+  // cancelling mid-`apt upgrade` leaves the command running on the server.
+  toolContext.abortSignal = abort.signal;
+
+  const model = createModel(modelConfig);
   // Skills are re-read per run so user skills in ~/.easyhost/skills apply
   // immediately; only their one-line descriptions enter the system prompt.
   const skills = loadSkills();
   const agent = new ToolLoopAgent({
-    model: google(MODEL_ID),
-    instructions: `${SYSTEM_PROMPT}\n\n${skillsPromptSection(skills)}`,
+    model,
+    providerOptions: buildProviderOptions(modelConfig),
+    instructions: `${SYSTEM_PROMPT}\n\n${skillsPromptSection(skills)}${opts.projectContext ?? ''}${buildTodoReminder(opts.todos)}`,
     tools: { ...buildTools(toolContext), ...buildSkillTool(skills, emit) },
     stopWhen: stepCountIs(maxSteps),
+    // Steering: before each reasoning step, fold any pending steer messages in
+    // as fresh user turns so the agent redirects without aborting current work.
+    prepareStep: ({ messages: stepMessages }) => {
+      if (steerQueue.length === 0) return {};
+      return { messages: injectSteerMessages(stepMessages, steerQueue.splice(0)) };
+    },
   });
 
   void (async () => {
@@ -122,6 +413,15 @@ export function startAgentRun(opts: StartAgentRunOptions): void {
           case 'text-delta':
             finalText += part.text;
             emit({ type: 'text-delta', text: part.text });
+            break;
+          // The model's thinking stream — Anthropic extended thinking, Codex /
+          // OpenAI reasoning summaries, Gemini thoughts. Forwarded so the
+          // renderer can show it live in a collapsible "Thinking" card.
+          case 'reasoning-delta':
+            if (part.text) emit({ type: 'reasoning-delta', text: part.text });
+            break;
+          case 'reasoning-end':
+            emit({ type: 'reasoning-end' });
             break;
           case 'finish-step': {
             stepIndex += 1;
@@ -150,11 +450,34 @@ export function startAgentRun(opts: StartAgentRunOptions): void {
         }
       }
 
+      // Reconcile the live per-step sum with the SDK's authoritative aggregate
+      // (documented as "the sum of all step usages"). They already match in the
+      // normal case; this guarantees the FINAL number is exact even if a step
+      // reported partial usage (e.g. totalTokens absent). The stream is fully
+      // consumed above, so this promise resolves immediately.
+      try {
+        const finalUsage = await result.totalUsage;
+        const authoritative =
+          finalUsage?.totalTokens ??
+          (finalUsage?.inputTokens ?? 0) + (finalUsage?.outputTokens ?? 0);
+        if (authoritative && authoritative !== totalTokens) {
+          totalTokens = authoritative;
+          emit({ type: 'usage', totalTokens });
+        }
+      } catch {
+        // Usage unavailable (rare) — keep the running per-step sum.
+      }
+
       if (stepIndex >= maxSteps) {
         emit({
           type: 'error',
           message: `Reached the step limit (${maxSteps}). Ask me to continue if the task isn't finished, or raise the limit in Settings.`,
         });
+      }
+      // A steer that landed after the final step never got a prepareStep to
+      // inject it — hand it back so the renderer resends it as a fresh turn.
+      if (steerQueue.length > 0) {
+        emit({ type: 'steer-unconsumed', items: steerQueue.splice(0) });
       }
       emit({ type: 'done', finalText });
     } catch (err) {

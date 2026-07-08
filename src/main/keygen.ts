@@ -51,3 +51,13 @@ export function consumePendingKey(keyRef: string): string | undefined {
   pending.delete(keyRef);
   return p.privateKeyOpenSSH;
 }
+
+/**
+ * Look up a keyRef's private key WITHOUT consuming it. Used by Test connection so
+ * a generated key can be verified and still be available to save afterwards.
+ * Returns undefined if unknown/expired.
+ */
+export function peekPendingKey(keyRef: string): string | undefined {
+  sweep();
+  return pending.get(keyRef)?.privateKeyOpenSSH;
+}

@@ -181,11 +181,113 @@ Reduction is shared: `applyTodos` (useAgentRun.ts) folds a `todos` event into
 the feed as ONE evolving `ChatTodoHistoryItem` — it updates the existing card in
 place (stable id → stable React key) instead of appending, so boxes tick off
 without spamming the transcript. Used by both the foreground reducer
-(useAgentRun) and background runs (chatRunManager). Rendered by `TodoCard` in
-AgentFeed.tsx (checklist header + N/total counter; completed = filled check +
-strikethrough, in_progress = spinner + bold, pending = hollow circle — no bare
-status dots). Persisted via the `todos` case in store.ts `isChatHistoryItem`
-(add-only validation — forgetting it silently drops the item on save).
+(useAgentRun) and background runs (chatRunManager). Persisted via the `todos`
+case in store.ts `isChatHistoryItem` (add-only validation — forgetting it
+silently drops the item on save).
+
+Two-part render in AgentFeed.tsx, matching how Claude Code + RooCode reconcile a
+task list with a streaming transcript (research-grounded — both keep ONE current
+list, always visible):
+- `TodoStatusBar` — a **pinned summary bar above the scroll area** (RooCode's
+  "task header" pattern), always showing progress (N/total + progress track) and
+  the in-flight task, so the checklist stays in view while text/tool cards stream
+  past and scroll it off. Click to expand the full list inline.
+- `TodoCard` — the **in-transcript record** (in-place updating) marking where the
+  plan was laid out, the way Claude Code renders it inline.
+Both use the shared `TodoRows` (glyphs: completed = filled check + strikethrough,
+in_progress = spinner + bold, pending = hollow circle — no bare status dots) and
+`todoProgress` helper. The bar reads `feed.find(kind==='todos')` so it updates
+live as the reducer patches the single todos item.
+
+## Steer & queue messages (send during a run)
+
+The composer stays enabled while a run streams (FCode's model). `TurnDispatchMode`
+= 'queue' | 'steer'. **Enter** while running → QUEUE (parks the message in the
+`ComposerQueuedHeader` above the composer, with Send-now/Edit/Delete; auto-sent
+when the run ends via ChatPanel's drain effect). **Cmd/Ctrl+Enter** → STEER
+(injected into the live run now).
+
+- Mid-run steer: `steerAgentRun(runId, items)` (agent.ts) pushes onto a per-run
+  `steerQueue`; the ToolLoopAgent's `prepareStep` folds them in as fresh user
+  messages at the next reasoning step (`injectSteerMessages`) — redirects without
+  aborting work. `agent:steer` IPC. A steer that lands after the final step is
+  returned via a `steer-unconsumed` event; chatRunManager `resendSteers` sends it
+  as a fresh turn so it's never lost.
+- chatRunManager.`steer(sessionId, item)` echoes the message (dispatchMode:'steer'
+  → "Steering" chip in AgentFeed) then injects; falls back to a fresh turn if the
+  run already ended. `start({echoUser:false})` continues from a feed that already
+  has the user bubble. Message-building lives in `lib/chatMessages.ts`
+  (`buildAgentMessages` / `feedToMessages`), shared by ChatPanel and the resend.
+
+**VERIFY WARNING (learned the hard way):** contextBridge FREEZES
+`window.easyhost.*`, so you CANNOT stub `agent.start`/`steer` in a CDP script —
+the reassignment is a silent no-op and a REAL run fires (which hit prod server E
+once). To verify chat UI, INJECT persisted sessions + screenshot only (never call
+`send()`/dispatch a real message), or target a disposable server — never
+"All servers"/E.
+
+## Chat attachments (files & images)
+
+The composer accepts files/images (attach button, paste, drag-drop). Images go
+to the model as vision input; text/config/code files are inlined into the prompt
+so the agent can read and deploy them.
+
+- `ChatAttachment` (ipc-types) on `ChatTextHistoryItem.attachments` +
+  `AgentStartRequest.attachments`; caps in `ATTACHMENT_LIMITS` (5 files, 5MB
+  image, 128KB text). `src/lib/attachments.ts` (renderer): classifyFile
+  (image/text/unsupported by MIME then extension), readFileAttachment (enforces
+  caps, image→dataUrl / text→content), formatBytes.
+- `src/agent/attachments.ts` (main): `buildModelMessages(textMsgs, attachments)`
+  folds the turn's attachments into the LAST user message as multimodal
+  ModelMessage content (images → image parts, text files inlined). Only the
+  current turn carries attachments — history stays text-only so big images
+  aren't re-sent. Called in ipc.ts before startAgentRun; agent.ts ChatMessage is
+  now `ModelMessage`.
+- ChatPanel composer: attach state, addFiles (reads BEFORE the setState updater
+  — side effects in a state updater double-fire under StrictMode and staged
+  every file twice), AttachmentChip previews, paperclip button, onPaste/onDrop.
+  chatRunManager.start carries attachments onto the user feed item + req.
+  AgentFeed `MessageAttachments` renders image thumbnails + file chips on user
+  bubbles. Persisted automatically (text item's optional attachments field).
+
+## Agent-requested forms (generative UI) + domain setup
+
+The agent can render an interactive FORM in the chat and pause until the user
+fills it in — instead of asking for each value in plain text. The plumbing
+mirrors the approval flow (agent pauses, user responds, agent continues):
+
+- `requestForm(spec)` in AgentToolContext (ipc.ts) returns a Promise resolved
+  with the user's values (or null on cancel). It emits a `form-required`
+  AgentEvent and parks a resolver in `pendingForms` keyed by formId; the
+  `agent:respond-form` IPC handler resolves it. Cleared (resolve null) on
+  nav/close, same as pendingApprovals.
+- Field defs live in CODE (`src/agent/forms.ts`), NOT in the model's tool args
+  — keeps the agent tool schemas flat (Gemini constraint) and lets us design
+  each form. `buildDomainForm({appName, suggestedPort})` builds the domain form.
+- Tool: `requestDomainSetup(appName?, suggestedPort?)` (tools.ts) — the agent
+  MUST detect the service port itself (`docker ps`/`ss`) and pass suggestedPort;
+  the form shows the user the detected port pre-filled (the user never types a
+  port). Returns `{submitted, values}` or `{submitted:false}` on cancel.
+- Feed item `ChatFormHistoryItem` (kind:'form', status pending→submitted/
+  cancelled + values). Reduced by `form-required` in BOTH useAgentRun and
+  chatRunManager; settled by `resolveFormItem` (shared) via respondForm.
+  Rendered by `FormCard` in AgentFeed (text/number/select/toggle fields; live
+  Submit/Cancel when pending, read-only record once settled). Persisted via the
+  `form` case in store.ts isChatHistoryItem (allowlist — MUST add new kinds or
+  they're silently dropped). markInterruptedToolsDone also cancels a form frozen
+  at 'pending' (dead run).
+- `setup-domain` skill = the form-first entry point (call requestDomainSetup,
+  then delegate the nginx/certbot work to the existing reverse-proxy-tls skill).
+  Artifacts rows (website/container/service) have a "Domain" button that
+  prefills the chat via CHAT_PREFILL_EVENT.
+- **In-form DNS guide**: the domain form carries `dnsGuide {serverIp,
+  domainField, wwwField}` (AgentFormSpec + ChatFormHistoryItem). The agent passes
+  its `serverIp` to requestDomainSetup; `FormCard`'s `DnsGuidePanel` renders a
+  live A-record table (Type A / Name computed from the typed domain via
+  `computeDnsRecordName` in lib/dns.ts — "@" for bare, label for subdomain, +
+  a www row when the www toggle is on / Value=serverIp / TTL 3600) plus
+  registrar steps. Reducers copy `dnsGuide` onto the feed item. So the "how do I
+  point my domain here" guidance is IN the form, not just in a later chat reply.
 
 ## Artifacts tab operations (actions, logs, exposure)
 

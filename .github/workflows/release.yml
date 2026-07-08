@@ -1,0 +1,179 @@
+name: Release Desktop
+
+# Tag a commit `vX.Y.Z` (or run manually with a version) to build every
+# platform and publish a GitHub Release with the installers — the same shape as
+# FCode's release flow, adapted to electron-forge. Unsigned for now (add Apple/
+# Azure signing secrets + forge signing config later).
+#
+# OAuth/GitHub-App config is injected from repository secrets at build time and
+# baked into the bundle by vite.main.config.ts — never committed.
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (e.g. 1.2.3 or v1.2.3)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  preflight:
+    name: Preflight
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      tag: ${{ steps.meta.outputs.tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - id: meta
+        shell: bash
+        run: |
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            raw="${{ github.event.inputs.version }}"
+          else
+            raw="${GITHUB_REF_NAME}"
+          fi
+          version="${raw#v}"
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Invalid release version: $raw" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: package.json
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Lint
+        run: bun run lint
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Test
+        run: bun run test
+
+  build:
+    name: Build ${{ matrix.label }}
+    needs: preflight
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: macOS arm64
+            runner: macos-14
+            arch: arm64
+          - label: macOS x64
+            runner: macos-13
+            arch: x64
+          - label: Linux x64
+            runner: ubuntu-24.04
+            arch: x64
+          - label: Windows x64
+            runner: windows-2022
+            arch: x64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: package.json
+
+      - name: Install dependencies
+        if: ${{ runner.os != 'Windows' }}
+        run: bun install --frozen-lockfile
+
+      - name: Install dependencies (Windows)
+        if: ${{ runner.os == 'Windows' }}
+        run: bun install --frozen-lockfile --ignore-scripts
+
+      - name: Install Linux packaging tools
+        if: ${{ runner.os == 'Linux' }}
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends fakeroot dpkg rpm
+
+      - name: Align package version to release
+        shell: bash
+        run: npm version "${{ needs.preflight.outputs.version }}" --no-git-tag-version --allow-same-version
+
+      - name: Make distributables
+        shell: bash
+        env:
+          GOOGLE_DRIVE_CLIENT_ID: ${{ secrets.GOOGLE_DRIVE_CLIENT_ID }}
+          GOOGLE_DRIVE_CLIENT_SECRET: ${{ secrets.GOOGLE_DRIVE_CLIENT_SECRET }}
+          GITHUB_CLIENT_ID: ${{ secrets.APP_GITHUB_CLIENT_ID }}
+          GITHUB_APP_SLUG: ${{ secrets.APP_GITHUB_APP_SLUG }}
+        run: bun run make -- --arch=${{ matrix.arch }}
+
+      - name: Collect artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          shopt -s nullglob globstar
+          for f in out/make/**/*.zip \
+                   out/make/**/*.dmg \
+                   out/make/**/*.exe \
+                   out/make/**/*.nupkg \
+                   out/make/**/*.deb \
+                   out/make/**/*.rpm; do
+            cp "$f" release-assets/ 2>/dev/null || true
+          done
+          ls -la release-assets
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: tevada-desktop-${{ matrix.arch }}-${{ runner.os }}
+          path: release-assets/*
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: Publish GitHub Release
+    needs: [preflight, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: tevada-desktop-*
+          merge-multiple: true
+          path: release-assets
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.preflight.outputs.tag }}
+          name: Tevada DevOps v${{ needs.preflight.outputs.version }}
+          generate_release_notes: true
+          files: release-assets/*
+          fail_on_unmatched_files: false

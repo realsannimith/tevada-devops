@@ -7,7 +7,7 @@ Read **AGENTS.md** first — it is the source of truth for this repo.
 When the user asks to run or preview UI changes, use the Electron dev app:
 
 ```bash
-cd EASY-HOST && bun run electron:dev
+cd "Tevada DevOps" && bun run electron:dev
 ```
 
 ## Design (mandatory for UI work)

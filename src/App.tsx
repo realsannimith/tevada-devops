@@ -1,9 +1,12 @@
 import { useState } from 'react';
 import { ServersProvider, useServers } from '@/hooks/useServers';
+import { ProjectsProvider, useProjects } from '@/hooks/useProjects';
 import { ServerSidebar } from '@/components/ServerSidebar';
 import { ServerFormDialog } from '@/components/ServerFormDialog';
+import { ProjectFormDialog } from '@/components/ProjectFormDialog';
 import { SettingsView } from '@/components/SettingsView';
 import { ChatPanel } from '@/components/ChatPanel';
+import { DashboardView } from '@/components/DashboardView';
 import { WizardsView } from '@/components/WizardsView';
 import { TerminalView } from '@/components/TerminalView';
 import { MonitoringView } from '@/components/MonitoringView';
@@ -25,12 +28,14 @@ export type ServerTab = 'terminal' | 'monitoring' | 'artifacts' | 'deploys';
 
 export type View =
   | { kind: 'server'; serverId: string; tab: ServerTab }
+  | { kind: 'dashboard' }
   | { kind: 'chat' }
   | { kind: 'wizards' }
   | { kind: 'settings' };
 
 function Shell() {
   const { servers } = useServers();
+  const { projects } = useProjects();
   const [view, setView] = useState<View>({ kind: 'chat' });
   const [addOpen, setAddOpen] = useState(false);
   const [editingServerId, setEditingServerId] = useState<string | null>(null);
@@ -38,6 +43,27 @@ function Shell() {
     ? servers.find((server) => server.id === editingServerId)
     : null;
   const serverDialogOpen = addOpen || Boolean(editingServer);
+
+  const [addProjectOpen, setAddProjectOpen] = useState(false);
+  const [editingProjectId, setEditingProjectId] = useState<string | null>(null);
+  const editingProject = editingProjectId
+    ? projects.find((p) => p.id === editingProjectId)
+    : null;
+  const projectDialogOpen = addProjectOpen || Boolean(editingProject);
+
+  const openAddProject = () => {
+    setEditingProjectId(null);
+    setAddProjectOpen(true);
+  };
+  const openEditProject = (projectId: string) => {
+    setAddProjectOpen(false);
+    setEditingProjectId(projectId);
+  };
+  const setProjectDialogOpen = (open: boolean) => {
+    if (open) return;
+    setAddProjectOpen(false);
+    setEditingProjectId(null);
+  };
 
   const openAddServer = () => {
     setEditingServerId(null);
@@ -66,6 +92,8 @@ function Shell() {
         onNavigate={setView}
         onAddServer={openAddServer}
         onEditServer={openEditServer}
+        onAddProject={openAddProject}
+        onEditProject={openEditProject}
         onOpenSettings={() => setView({ kind: 'settings' })}
       />
 
@@ -83,6 +111,7 @@ function Shell() {
           <div className={view.kind === 'wizards' ? 'h-full' : 'hidden'}>
             <WizardsView />
           </div>
+          {view.kind === 'dashboard' && <DashboardView onNavigate={setView} />}
           {view.kind === 'server' && (
             <ServerPane
               view={view}
@@ -98,6 +127,12 @@ function Shell() {
         open={serverDialogOpen}
         onOpenChange={setServerDialogOpen}
         server={editingServer}
+      />
+
+      <ProjectFormDialog
+        open={projectDialogOpen}
+        onOpenChange={setProjectDialogOpen}
+        project={editingProject}
       />
     </div>
   );
@@ -247,7 +282,9 @@ function ConnStatusPill({ status }: { status: ConnStatus }) {
 export default function App() {
   return (
     <ServersProvider>
-      <Shell />
+      <ProjectsProvider>
+        <Shell />
+      </ProjectsProvider>
     </ServersProvider>
   );
 }

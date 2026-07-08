@@ -17,6 +17,7 @@ import {
   ServerProfile,
   ServerSecret,
 } from '../shared/ipc-types';
+import * as knownHosts from './knownHosts';
 
 type Managed = {
   client: Client;
@@ -29,6 +30,13 @@ type Managed = {
 export type ExecOptions = {
   timeoutMs?: number;
   maxOutputBytes?: number;
+  /**
+   * Abort the command mid-flight (e.g. the user hit Stop on the agent run).
+   * Closes the exec channel — which sends EOF/close to the remote — and rejects
+   * the exec promise. If it fires while the exec is still queued behind another
+   * command, the exec is rejected before it ever opens a channel.
+   */
+  signal?: AbortSignal;
 };
 
 type Listeners = {
@@ -64,8 +72,14 @@ export class ConnectionManager {
     this.listeners.onStatus(serverId, status, error);
   }
 
-  /** Build the ssh2 connect config from a profile + its decrypted secret. */
-  private buildConfig(profile: ServerProfile, secret: ServerSecret) {
+  /** Build the ssh2 connect config from a profile + its decrypted secret.
+   *  `hostVerifier` pins/verifies the server's host key (TOFU) — never connect
+   *  without it, or credentials are sent to any host answering on the address. */
+  private buildConfig(
+    profile: ServerProfile,
+    secret: ServerSecret,
+    hostVerifier: (key: Buffer) => boolean,
+  ) {
     return {
       host: profile.host,
       port: profile.port,
@@ -73,10 +87,39 @@ export class ConnectionManager {
       password: profile.authType === 'password' ? secret.password : undefined,
       privateKey: profile.authType === 'key' ? secret.privateKey : undefined,
       passphrase: secret.passphrase || undefined,
+      hostVerifier,
       keepaliveInterval: 10_000,
       keepaliveCountMax: 3,
       readyTimeout: 20_000,
     };
+  }
+
+  /** A host-key verifier bound to one profile. Trust-on-first-use: pins the key
+   *  on first connect, rejects a later changed key. Sets `mismatch.hit` so the
+   *  caller can replace ssh2's generic error with an actionable one. */
+  private makeHostVerifier(
+    profile: ServerProfile,
+    mismatch: { hit: boolean },
+  ): (key: Buffer) => boolean {
+    return (key: Buffer): boolean => {
+      const result = knownHosts.verifyAndPin(profile.host, profile.port, key);
+      if (result === 'mismatch') {
+        mismatch.hit = true;
+        return false;
+      }
+      return true;
+    };
+  }
+
+  private hostKeyChangedMessage(profile: ServerProfile): string {
+    return (
+      `Host key verification failed for ${profile.host}: the server's SSH ` +
+      `identity has changed since you last connected. This usually means the ` +
+      `server was rebuilt or reinstalled — but it can also mean the connection ` +
+      `is being intercepted. If you know the server was rebuilt, remove and ` +
+      `re-add it (or forget its saved key) to trust the new one; otherwise do ` +
+      `NOT connect.`
+    );
   }
 
   /**
@@ -89,6 +132,7 @@ export class ConnectionManager {
   ): Promise<{ ok: boolean; error?: string }> {
     return new Promise((resolve) => {
       const client = new Client();
+      const mismatch = { hit: false };
       let settled = false;
       const done = (ok: boolean, error?: string) => {
         if (settled) return;
@@ -102,8 +146,19 @@ export class ConnectionManager {
       };
       client
         .on('ready', () => done(true))
-        .on('error', (err) => done(false, err.message))
-        .connect(this.buildConfig(profile, secret));
+        .on('error', (err) =>
+          done(
+            false,
+            mismatch.hit ? this.hostKeyChangedMessage(profile) : err.message,
+          ),
+        )
+        .connect(
+          this.buildConfig(
+            profile,
+            secret,
+            this.makeHostVerifier(profile, mismatch),
+          ),
+        );
     });
   }
 
@@ -118,6 +173,7 @@ export class ConnectionManager {
 
     return new Promise((resolve) => {
       const client = new Client();
+      const mismatch = { hit: false };
       const managed: Managed = {
         client,
         status: 'connecting',
@@ -137,10 +193,13 @@ export class ConnectionManager {
         })
 
         .on('error', (err) => {
-          this.setStatus(profile.id, 'error', err.message);
+          const message = mismatch.hit
+            ? this.hostKeyChangedMessage(profile)
+            : err.message;
+          this.setStatus(profile.id, 'error', message);
           if (!settled) {
             settled = true;
-            resolve({ ok: false, error: err.message });
+            resolve({ ok: false, error: message });
           }
         })
         .on('close', () => {
@@ -159,7 +218,13 @@ export class ConnectionManager {
             this.setStatus(profile.id, 'disconnected');
           }
         })
-        .connect(this.buildConfig(profile, secret));
+        .connect(
+          this.buildConfig(
+            profile,
+            secret,
+            this.makeHostVerifier(profile, mismatch),
+          ),
+        );
 
       // Interactive typing dies by Nagle's algorithm: without TCP_NODELAY each
       // keystroke packet can sit in the send buffer waiting on the previous
@@ -212,9 +277,67 @@ export class ConnectionManager {
   ): Promise<ExecResult> {
     const timeoutMs = opts.timeoutMs ?? DEFAULT_EXEC_TIMEOUT;
     const maxBytes = opts.maxOutputBytes ?? DEFAULT_MAX_OUTPUT;
+    const signal = opts.signal;
     return new Promise((resolve, reject) => {
-      m.client.exec(command, { pty: false }, (err, channel) => {
-        if (err) return reject(err);
+      if (signal?.aborted) {
+        reject(new Error('Command aborted before it started.'));
+        return;
+      }
+
+      let channel: ClientChannel | undefined;
+      let aborted = false;
+      let settled = false;
+
+      // Abort can fire at three points: before the exec channel opens (still
+      // queued / handshaking), or while it's streaming. Track a flag + the
+      // channel handle so each case closes the channel and rejects exactly once.
+      const onAbort = () => {
+        aborted = true;
+        if (channel) {
+          try {
+            channel.close();
+          } catch {
+            /* noop */
+          }
+        } else if (!settled) {
+          settled = true;
+          detach();
+          reject(new Error('Command aborted by user.'));
+        }
+      };
+      const detach = () => {
+        if (signal) signal.removeEventListener('abort', onAbort);
+      };
+      if (signal) signal.addEventListener('abort', onAbort, { once: true });
+
+      m.client.exec(command, { pty: false }, (err, ch) => {
+        if (settled) {
+          // Aborted before the channel opened — close the late channel if the
+          // exec still succeeded, and drop it.
+          if (!err && ch) {
+            try {
+              ch.close();
+            } catch {
+              /* noop */
+            }
+          }
+          return;
+        }
+        if (err) {
+          settled = true;
+          detach();
+          return reject(err);
+        }
+        channel = ch;
+        if (aborted) {
+          // Aborted between listener registration and channel open.
+          try {
+            ch.close();
+          } catch {
+            /* noop */
+          }
+        }
+
         let stdout = '';
         let stderr = '';
         let truncated = false;
@@ -232,21 +355,27 @@ export class ConnectionManager {
         const timer = setTimeout(() => {
           timedOut = true;
           try {
-            channel.close();
+            ch.close();
           } catch {
             /* noop */
           }
         }, timeoutMs);
 
-        channel
-          .on('data', (chunk: Buffer) => {
-            stdout = append(stdout, chunk);
-          })
+        ch.on('data', (chunk: Buffer) => {
+          stdout = append(stdout, chunk);
+        })
           .on('exit', (code: number | null) => {
             exitCode = code;
           })
           .on('close', () => {
             clearTimeout(timer);
+            detach();
+            if (settled) return;
+            settled = true;
+            if (aborted) {
+              reject(new Error('Command aborted by user.'));
+              return;
+            }
             resolve({
               stdout: stdout.slice(0, maxBytes),
               stderr: stderr.slice(0, maxBytes),
@@ -255,7 +384,7 @@ export class ConnectionManager {
               timedOut,
             });
           });
-        channel.stderr.on('data', (chunk: Buffer) => {
+        ch.stderr.on('data', (chunk: Buffer) => {
           stderr = append(stderr, chunk);
         });
       });

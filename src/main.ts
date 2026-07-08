@@ -4,6 +4,7 @@ import { app, BrowserWindow, shell } from 'electron';
 import path from 'node:path';
 import started from 'electron-squirrel-startup';
 import { registerIpc } from './main/ipc';
+import { logger, installCrashHandlers } from './main/logger';
 import { applyAppIcon, getWindowIconOption } from './main/appIcon';
 import { resolveDesktopRuntimeInfo } from './main/runtimeArch';
 import {
@@ -42,6 +43,11 @@ app.setPath(
     isDevelopment,
   }),
 );
+
+// Capture uncaught exceptions / unhandled rejections to the log file. Installed
+// right after the userData path is set (so the log lands in the right profile)
+// and before any real work, so an early crash is still recorded.
+installCrashHandlers();
 
 // Set the app name synchronously at the top level — BEFORE app.whenReady() —
 // so macOS uses it for the dock tooltip and menu bar instead of the default
@@ -120,12 +126,13 @@ const createWindow = () => {
 app.whenReady().then(() => {
   configureAppIdentity();
   applyAppIcon();
-  console.info('[tevada-devops] runtime', {
+  logger.info('runtime ready', {
     runtimeHome,
     stateDir,
     userData: app.getPath('userData'),
     isDevelopment,
     desktopRuntimeInfo,
+    logFile: logger.filePath(),
   });
 
   // safeStorage and all IPC wiring must happen after the app is ready.

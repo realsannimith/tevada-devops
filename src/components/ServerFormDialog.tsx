@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react';
-import { Copy, Check, KeyRound, Sparkles } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
+import { Copy, Check, KeyRound, Sparkles, Upload } from 'lucide-react';
 import {
   Dialog,
   DialogContent,
@@ -18,8 +18,8 @@ import {
   SelectContent,
   SelectItem,
   SelectTrigger,
-  SelectValue,
 } from '@/components/ui/select';
+import { ProviderLogo } from '@/components/providerLogos';
 import type { AuthType, ServerSecret, ServerWithStatus } from '@/shared/ipc-types';
 import { useServers } from '@/hooks/useServers';
 
@@ -92,6 +92,8 @@ export function ServerFormDialog({
 
   const [keyMode, setKeyMode] = useState<KeyMode>('generate');
   const [privateKey, setPrivateKey] = useState('');
+  const [keyFileName, setKeyFileName] = useState('');
+  const keyFileInput = useRef<HTMLInputElement>(null);
   const [passphrase, setPassphrase] = useState('');
   const [genPublicKey, setGenPublicKey] = useState('');
   const [genKeyRef, setGenKeyRef] = useState('');
@@ -116,6 +118,7 @@ export function ServerFormDialog({
     setPassword('');
     setKeyMode('paste');
     setPrivateKey('');
+    setKeyFileName('');
     setPassphrase('');
     setGenPublicKey('');
     setGenKeyRef('');
@@ -139,6 +142,7 @@ export function ServerFormDialog({
     setPassword('');
     setKeyMode('generate');
     setPrivateKey('');
+    setKeyFileName('');
     setPassphrase('');
     setGenPublicKey('');
     setGenKeyRef('');
@@ -159,6 +163,30 @@ export function ServerFormDialog({
     setGenKeyRef(keyRef);
     setGenPublicKey(publicKey);
     setGenerating(false);
+    // A freshly generated key replaces any unreadable saved credential, so drop
+    // the stale "paste the key again" warning.
+    setMsg(null);
+  }
+
+  async function onKeyFile(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = ''; // let the same file be re-picked later
+    if (!file) return;
+    if (file.size > 512 * 1024) {
+      setMsg({ ok: false, text: 'That file is too large to be an SSH key.' });
+      return;
+    }
+    const text = await file.text();
+    if (!/-----BEGIN [\w ]*PRIVATE KEY-----/.test(text)) {
+      setMsg({
+        ok: false,
+        text: `"${file.name}" doesn't look like a private key file. Pick the .pem AWS gave you.`,
+      });
+      return;
+    }
+    setPrivateKey(text);
+    setKeyFileName(file.name);
+    setMsg({ ok: true, text: `Loaded key from "${file.name}".` });
   }
 
   async function copyKey() {
@@ -196,7 +224,7 @@ export function ServerFormDialog({
         : !!privateKey);
 
   async function test() {
-    if (!valid || usingGenerated) return;
+    if (!valid) return;
     setTesting(true);
     setMsg(null);
     const { profile, secret } = buildPayload();
@@ -247,12 +275,18 @@ export function ServerFormDialog({
             <Label>Provider</Label>
             <Select value={provider} onValueChange={pickProvider}>
               <SelectTrigger>
-                <SelectValue />
+                <span className="flex items-center gap-2">
+                  <ProviderLogo id={provider} />
+                  {prov.label}
+                </span>
               </SelectTrigger>
               <SelectContent>
                 {Object.entries(PROVIDERS).map(([k, v]) => (
                   <SelectItem key={k} value={k}>
-                    {v.label}
+                    <span className="flex items-center gap-2">
+                      <ProviderLogo id={k} />
+                      {v.label}
+                    </span>
                   </SelectItem>
                 ))}
               </SelectContent>
@@ -355,16 +389,46 @@ export function ServerFormDialog({
                         {prov.keyHint} The private key stays encrypted on this
                         Mac — you never handle it.
                       </p>
+                      <p className="text-xs text-muted-foreground">
+                        Once the key is on your server, click{' '}
+                        <span className="font-medium text-ink">Test connection</span>{' '}
+                        to verify it before saving.
+                      </p>
                     </div>
                   )}
                 </TabsContent>
 
                 <TabsContent value="paste" className="space-y-2 pt-3">
+                  <input
+                    ref={keyFileInput}
+                    type="file"
+                    accept=".pem,.key,.txt,application/x-pem-file,text/plain"
+                    className="hidden"
+                    onChange={onKeyFile}
+                  />
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    className="w-full"
+                    onClick={() => keyFileInput.current?.click()}
+                  >
+                    <Upload className="h-4 w-4" />
+                    {keyFileName
+                      ? `Loaded: ${keyFileName}`
+                      : 'Upload key file (.pem from AWS)'}
+                  </Button>
+                  <p className="text-xs text-muted-foreground">
+                    Pick the <code>.pem</code> key AWS gave you when you created the
+                    instance — or paste it below.
+                  </p>
                   <Label htmlFor="key">Private key (PEM / OpenSSH)</Label>
                   <Textarea
                     id="key"
                     value={privateKey}
-                    onChange={(e) => setPrivateKey(e.target.value)}
+                    onChange={(e) => {
+                      setPrivateKey(e.target.value);
+                      if (keyFileName) setKeyFileName('');
+                    }}
                     placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"
                     className="h-24 font-mono text-xs"
                   />
@@ -411,10 +475,10 @@ export function ServerFormDialog({
           <Button
             variant="outline"
             onClick={test}
-            disabled={!valid || testing || usingGenerated}
+            disabled={!valid || testing}
             title={
               usingGenerated
-                ? 'Save first, then Connect — a new key must be added to the server before it works.'
+                ? 'Add the generated public key to your server first, then test.'
                 : undefined
             }
           >

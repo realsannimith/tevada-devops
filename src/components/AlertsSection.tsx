@@ -9,6 +9,7 @@
  */
 import { useCallback, useEffect, useState } from 'react';
 import { Button } from '@/components/ui/button';
+import { ConfirmButton } from '@/components/ConfirmButton';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
@@ -112,14 +113,6 @@ export function AlertsSection() {
 
   return (
     <div className="grid gap-2">
-      <div className="pr-4">
-        <Label>Telegram alerts</Label>
-        <p className="text-xs text-muted-foreground">
-          Get a message when a server goes down or runs low on resources. Alerts
-          only fire on sustained problems, never on brief spikes.
-        </p>
-      </div>
-
       {!status ? (
         <div className="flex items-center gap-2 py-2 text-xs text-muted-foreground">
           <Loader2Icon className="size-3.5 animate-spin" /> Checking…
@@ -161,9 +154,17 @@ export function AlertsSection() {
                 {config?.botUsername ? `@${config.botUsername}` : 'connected'}
               </p>
             </div>
-            <Button variant="outline" size="sm" onClick={disconnect} disabled={busy}>
+            <ConfirmButton
+              variant="outline"
+              size="sm"
+              disabled={busy}
+              confirmTitle="Disconnect Telegram alerts?"
+              confirmDescription="The saved bot token and alert configuration are removed from this device, and EasyHost stops sending Telegram alerts. You can reconnect anytime."
+              confirmLabel="Disconnect"
+              onConfirm={disconnect}
+            >
               Disconnect
-            </Button>
+            </ConfirmButton>
           </div>
 
           {/* Chat picker */}

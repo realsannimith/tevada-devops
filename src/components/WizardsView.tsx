@@ -116,6 +116,7 @@ export function WizardsView() {
     start,
     cancel,
     respondApproval,
+    respondForm,
     clear,
     replaceFeed,
   } = useAgentRun();
@@ -567,6 +568,7 @@ export function WizardsView() {
             error={error}
             approval={approval}
             onApprove={respondApproval}
+            onSubmitForm={respondForm}
             running={running}
             tokens={tokens}
             emptyMessage="Configure the wizard on the left, then run it. Output streams here."

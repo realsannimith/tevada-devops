@@ -38,6 +38,9 @@ export function useAgentRun() {
   const [approval, setApproval] = useState<PendingApproval | null>(null);
   const runIdRef = useRef<string | null>(null);
   const assistantIdRef = useRef<string | null>(null);
+  // A thinking block just closed — the next reasoning delta starts a new
+  // paragraph inside the same card instead of running the blocks together.
+  const reasoningEndedRef = useRef(false);
   // The agent emits 'error' mid-stream and still closes with 'done'; remember
   // the failure so the final outcome reads 'error', not 'done'.
   const sawErrorRef = useRef(false);
@@ -79,6 +82,35 @@ export function useAgentRun() {
         });
         break;
       }
+      case 'reasoning-delta': {
+        const sep = reasoningEndedRef.current;
+        reasoningEndedRef.current = false;
+        setFeed((f) => {
+          const last = f[f.length - 1];
+          // Contiguous thinking accumulates into one card; any text/tool item
+          // in between starts a fresh card.
+          if (last && last.kind === 'reasoning') {
+            const copy = f.slice();
+            copy[copy.length - 1] = {
+              ...last,
+              content: last.content + (sep ? '\n\n' : '') + event.text,
+            };
+            return copy;
+          }
+          return [
+            ...f,
+            {
+              kind: 'reasoning',
+              id: `r_${Date.now()}_${Math.random().toString(36).slice(2)}`,
+              content: event.text,
+            },
+          ];
+        });
+        break;
+      }
+      case 'reasoning-end':
+        reasoningEndedRef.current = true;
+        break;
       case 'tool-start':
         assistantIdRef.current = null; // next text starts a fresh bubble
         setFeed((f) => [
@@ -117,6 +149,22 @@ export function useAgentRun() {
       case 'todos':
         assistantIdRef.current = null; // next text starts a fresh bubble
         setFeed((f) => applyTodos(f, event.todos));
+        break;
+      case 'form-required':
+        assistantIdRef.current = null; // next text starts a fresh bubble
+        setFeed((f) => [
+          ...f,
+          {
+            kind: 'form',
+            formId: event.form.formId,
+            title: event.form.title,
+            description: event.form.description,
+            submitLabel: event.form.submitLabel,
+            fields: event.form.fields,
+            dnsGuide: event.form.dnsGuide,
+            status: 'pending',
+          },
+        ]);
         break;
       case 'usage':
         setTokens(event.totalTokens);
@@ -164,6 +212,7 @@ export function useAgentRun() {
     sawErrorRef.current = false;
     setRunning(true);
     assistantIdRef.current = null;
+    reasoningEndedRef.current = false;
     if (userEcho) {
       setFeed((f) => [
         ...f,
@@ -192,11 +241,22 @@ export function useAgentRun() {
     [approval],
   );
 
+  const respondForm = useCallback(
+    async (formId: string, values: Record<string, string> | null) => {
+      setFeed((f) =>
+        resolveFormItem(f, formId, values ? 'submitted' : 'cancelled', values ?? undefined),
+      );
+      await window.easyhost.agent.respondForm(formId, values);
+    },
+    [],
+  );
+
   const clear = useCallback(() => {
     // Full reset: also detach from any in-flight run so its late events
     // (cancelled marker, trailing tool-ends) can't leak into a fresh chat.
     runIdRef.current = null;
     assistantIdRef.current = null;
+    reasoningEndedRef.current = false;
     sawErrorRef.current = false;
     setRunning(false);
     setApproval(null);
@@ -227,6 +287,7 @@ export function useAgentRun() {
     start,
     cancel,
     respondApproval,
+    respondForm,
     clear,
     replaceFeed,
   };
@@ -249,6 +310,24 @@ export function applyTodos(feed: FeedItem[], todos: TodoItem[]): FeedItem[] {
   const copy = feed.slice();
   copy[idx] = { ...(copy[idx] as Extract<FeedItem, { kind: 'todos' }>), todos };
   return copy;
+}
+
+/**
+ * Mark a form feed item submitted/cancelled in place, stamping the values —
+ * turns the interactive form into a read-only record. Shared by the foreground
+ * and background reducers so both settle a form the same way.
+ */
+export function resolveFormItem(
+  feed: FeedItem[],
+  formId: string,
+  status: 'submitted' | 'cancelled',
+  values?: Record<string, string>,
+): FeedItem[] {
+  return feed.map((it) =>
+    it.kind === 'form' && it.formId === formId
+      ? { ...it, status, values }
+      : it,
+  );
 }
 
 /** Render a tool call's raw result object into the transcript's output text.

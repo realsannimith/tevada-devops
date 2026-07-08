@@ -14,12 +14,18 @@ import { z } from 'zod';
 import { ConnectionManager } from '../main/connection-manager';
 import {
   AgentEvent,
+  AgentFormSpec,
   DatabaseCredentialMeta,
   GithubReposResult,
   SaveDatabaseCredentialRequest,
   ServerStats,
   ServerWithStatus,
 } from '../shared/ipc-types';
+import {
+  buildDatabaseBackupForm,
+  buildDomainForm,
+  buildS3StorageForm,
+} from './forms';
 import { isCatastrophic } from './blacklist';
 
 const MAX_TOOL_RESULT = 16 * 1024;
@@ -40,6 +46,18 @@ export function nextToolCallId(prefix: string): string {
 export type AgentToolContext = {
   cm: ConnectionManager;
   approvalMode: boolean;
+  /**
+   * The run's cancellation signal. Threaded into every remote exec so that
+   * hitting Stop closes the in-flight command's SSH channel instead of leaving
+   * it running to completion on the server. Set by startAgentRun.
+   */
+  abortSignal?: AbortSignal;
+  /**
+   * When set, the run is hard-scoped to a project: the agent may only see and
+   * operate on these servers. Every server-targeting tool rejects an id outside
+   * this set. Undefined = unscoped (full access, e.g. a chat with no project).
+   */
+  allowedServerIds?: Set<string>;
   listServers: () => ServerWithStatus[];
   /** Connect (loading the stored secret in main). */
   connect: (serverId: string) => Promise<{ ok: boolean; error?: string }>;
@@ -51,6 +69,12 @@ export type AgentToolContext = {
     command: string,
     reason: string,
   ) => Promise<boolean>;
+  /** Render an interactive form in the chat and wait for the user to fill it
+   *  in. Resolves with their values (keyed by field.key), or null if they
+   *  cancelled. The `formId` on the spec is assigned by main. */
+  requestForm: (
+    spec: Omit<AgentFormSpec, 'formId'>,
+  ) => Promise<Record<string, string> | null>;
   /** Persists a database credential (encrypted) so the user can retrieve it
    *  later from the Artifacts tab. Upserts by (serverId, engine, port). */
   saveDatabaseCredential: (
@@ -72,9 +96,28 @@ export type AgentToolContext = {
   setupDeployNotifications: (
     serverId: string,
   ) => Promise<{ ok: boolean; telegramConfigured: boolean; error?: string }>;
+  /** Writes S3 credentials from the storage form straight to a root-only env
+   *  file on the server (main → server), so the access keys never enter the
+   *  model context / the AI provider. Returns only the env file path. Mirrors
+   *  setupDeployNotifications' handling of the Telegram token. */
+  writeS3Credentials: (input: {
+    serverId: string;
+    purpose: 'image-uploads' | 'backups';
+    values: Record<string, string>;
+  }) => Promise<{ ok: boolean; envPath?: string; error?: string }>;
 };
 
 export function buildTools(ctx: AgentToolContext) {
+  // Hard project scope: reject any serverId outside the allowed set so the
+  // agent physically cannot touch out-of-project servers, even if it guesses an
+  // id listServers never showed it.
+  const ensureAllowed = (serverId: string) => {
+    if (ctx.allowedServerIds && !ctx.allowedServerIds.has(serverId)) {
+      throw new Error(
+        `Server "${serverId}" is outside this chat's project scope. This chat is limited to its project's servers — call listServers to see which servers you may use.`,
+      );
+    }
+  };
   return {
     listServers: tool({
       description:
@@ -99,6 +142,7 @@ export function buildTools(ctx: AgentToolContext) {
         serverId: z.string().describe('The id of the server to connect to.'),
       }),
       execute: async ({ serverId }) => {
+        ensureAllowed(serverId);
         const res = await ctx.connect(serverId);
         return res.ok
           ? { connected: true }
@@ -124,6 +168,7 @@ export function buildTools(ctx: AgentToolContext) {
           .describe('A short human-readable summary shown in the activity feed.'),
       }),
       execute: async ({ serverId, command, timeoutSec, description }) => {
+        ensureAllowed(serverId);
         const toolCallId = nextToolCallId('cmd');
         ctx.emit({
           type: 'tool-start',
@@ -155,6 +200,7 @@ export function buildTools(ctx: AgentToolContext) {
           const res = await ctx.cm.exec(serverId, command, {
             timeoutMs: timeoutSec * 1000,
             maxOutputBytes: MAX_TOOL_RESULT,
+            signal: ctx.abortSignal,
           });
           const result = {
             exitCode: res.exitCode,
@@ -194,6 +240,7 @@ export function buildTools(ctx: AgentToolContext) {
           .describe('A short human-readable summary shown in the activity feed.'),
       }),
       execute: async ({ serverId, script, sudo, timeoutSec, description }) => {
+        ensureAllowed(serverId);
         const toolCallId = nextToolCallId('scr');
         ctx.emit({
           type: 'tool-start',
@@ -233,7 +280,11 @@ export function buildTools(ctx: AgentToolContext) {
           const res = await ctx.cm.exec(
             serverId,
             `${runner} ${remotePath}; rc=$?; rm -f ${remotePath}; exit $rc`,
-            { timeoutMs: timeoutSec * 1000, maxOutputBytes: MAX_TOOL_RESULT },
+            {
+              timeoutMs: timeoutSec * 1000,
+              maxOutputBytes: MAX_TOOL_RESULT,
+              signal: ctx.abortSignal,
+            },
           );
           const result = {
             exitCode: res.exitCode,
@@ -250,6 +301,15 @@ export function buildTools(ctx: AgentToolContext) {
           };
           ctx.emit({ type: 'tool-end', toolCallId, result });
           return result;
+        } finally {
+          // Safety net: the in-band `rm -f` above only runs if the exec
+          // completes. On timeout, abort, or a dropped connection the staging
+          // script leaks under /tmp — clean it up out of band. Fire-and-forget
+          // (no signal, short timeout) so it neither blocks the tool return nor
+          // gets cancelled by the same Stop that aborted the run.
+          void ctx.cm
+            .exec(serverId, `rm -f ${remotePath}`, { timeoutMs: 5000 })
+            .catch((): void => {});
         }
       },
     }),
@@ -300,6 +360,7 @@ export function buildTools(ctx: AgentToolContext) {
           .describe('The exact password you set (from generatePassword).'),
       }),
       execute: async ({ serverId, engine, host, port, database, username, password }) => {
+        ensureAllowed(serverId);
         try {
           const meta = ctx.saveDatabaseCredential({
             serverId,
@@ -328,6 +389,7 @@ export function buildTools(ctx: AgentToolContext) {
         maxBytes: z.number().default(32768),
       }),
       execute: async ({ serverId, path, maxBytes }) => {
+        ensureAllowed(serverId);
         try {
           const { content, truncated } = await ctx.cm.sftpReadFile(
             serverId,
@@ -352,17 +414,22 @@ export function buildTools(ctx: AgentToolContext) {
         sudo: z.boolean().default(false),
       }),
       execute: async ({ serverId, path, content, mode, sudo }) => {
+        ensureAllowed(serverId);
+        // Staged path for the sudo branch; cleaned up in finally so a failed
+        // `sudo mv` doesn't leave the (possibly sensitive) content under /tmp.
+        let stagedTmp: string | undefined;
         try {
           if (sudo) {
             const tmp = `/tmp/easyhost-${Date.now()}-${Math.floor(
               content.length,
             )}`;
+            stagedTmp = tmp;
             await ctx.cm.sftpWriteFile(serverId, tmp, content);
             const chmod = mode ? `sudo chmod ${mode} ${path}; ` : '';
             const res = await ctx.cm.exec(
               serverId,
               `sudo mv ${tmp} ${path}; ${chmod}echo done`,
-              { timeoutMs: 30000 },
+              { timeoutMs: 30000, signal: ctx.abortSignal },
             );
             if (res.exitCode !== 0)
               return { ok: false, stderr: truncate(res.stderr) };
@@ -379,6 +446,14 @@ export function buildTools(ctx: AgentToolContext) {
             ok: false,
             error: err instanceof Error ? err.message : String(err),
           };
+        } finally {
+          // If a sudo write failed or was aborted after staging, the raw
+          // content is still sitting in /tmp. Best-effort remove it out of band.
+          if (stagedTmp) {
+            void ctx.cm
+              .exec(serverId, `rm -f ${stagedTmp}`, { timeoutMs: 5000 })
+              .catch((): void => {});
+          }
         }
       },
     }),
@@ -412,15 +487,139 @@ export function buildTools(ctx: AgentToolContext) {
         serverId: z.string().describe('The server the deployment runs on.'),
       }),
       execute: async ({ serverId }) => {
+        ensureAllowed(serverId);
         const conn = await ctx.connect(serverId);
         if (!conn.ok) return { ok: false, error: conn.error ?? 'connect failed' };
         return ctx.setupDeployNotifications(serverId);
       },
     }),
 
+    requestDomainSetup: tool({
+      description:
+        "Show the user an interactive form to configure a custom domain for a deployed service, then return the values they enter. Call this FIRST whenever the user wants to point a domain / custom URL at an app or service — do NOT ask for the domain, port, HTTPS preference, or email in plain text; this on-screen form collects them all at once and is far easier for a non-expert than typing answers. IMPORTANT: figure out the port yourself FIRST (`docker ps` / `ss -tlnp` — you deployed it, so you know where it listens) and ALWAYS pass it as `suggestedPort` — the user should never have to know or type the port; the form shows them the port you detected, pre-filled. Also pass `appName`. It's good practice to first tell the user, in one line, which server IP their DNS A-record should point at (from listServers). After the user submits, use the returned values with the setup-domain skill to configure the reverse proxy and TLS. If the user cancels, ask how they'd like to proceed instead.",
+      inputSchema: z.object({
+        appName: z
+          .string()
+          .optional()
+          .describe('The app/service the domain is for — shown in the form title.'),
+        suggestedPort: z
+          .number()
+          .optional()
+          .describe(
+            'REQUIRED in practice: the local port you detected the service listening on. Pre-filled in the form and shown to the user as the detected port — always provide it so they don’t have to.',
+          ),
+        serverIp: z
+          .string()
+          .optional()
+          .describe(
+            "This server's public IP (from listServers, or `curl -4 -s ifconfig.me`). Shown in the form's built-in DNS guide as the exact A-record value the user must add at their registrar. Always provide it.",
+          ),
+      }),
+      execute: async ({ appName, suggestedPort, serverIp }) => {
+        const values = await ctx.requestForm(
+          buildDomainForm({ appName, suggestedPort, serverIp }),
+        );
+        if (!values) {
+          return {
+            submitted: false,
+            note: 'The user cancelled the domain setup form. Ask how they want to proceed.',
+          };
+        }
+        return { submitted: true, values };
+      },
+    }),
+
+    requestDatabaseBackupSetup: tool({
+      description:
+        "Show the user an interactive form to configure automatic database backups (engine, database, schedule, retention, optional off-site S3 copy), then return the values they enter. Call this FIRST whenever the user wants to back up / protect / schedule dumps of a database — do NOT ask for the schedule or retention in plain text. IMPORTANT: detect the database yourself FIRST (`docker ps`, `ss -tlnp`) and pass it as `detectedEngine` so the form is pre-filled — the user should never have to identify their own database engine. After the user submits, load the setup-database-backup skill and follow it with the returned values. If `offsite` comes back 'true', you will additionally call requestS3StorageSetup (purpose 'backups') as that skill directs. If the user cancels, ask how they'd like to proceed instead.",
+      inputSchema: z.object({
+        detectedEngine: z
+          .enum(['postgresql', 'mysql', 'mariadb', 'mongodb', 'redis'])
+          .optional()
+          .describe(
+            'REQUIRED in practice: the database engine you detected running on the server. Pre-selects the form field so the user doesn’t have to know it.',
+          ),
+        suggestedDatabase: z
+          .string()
+          .optional()
+          .describe(
+            'A specific database name you detected (e.g. from the app you deployed). Leave unset to default to backing up all databases.',
+          ),
+      }),
+      execute: async ({ detectedEngine, suggestedDatabase }) => {
+        const values = await ctx.requestForm(
+          buildDatabaseBackupForm({ detectedEngine, suggestedDatabase }),
+        );
+        if (!values) {
+          return {
+            submitted: false,
+            note: 'The user cancelled the backup setup form. Ask how they want to proceed.',
+          };
+        }
+        return { submitted: true, values };
+      },
+    }),
+
+    requestS3StorageSetup: tool({
+      description:
+        "Show the user an interactive form to connect an S3-compatible bucket (AWS S3, Cloudflare R2, DigitalOcean Spaces, Backblaze B2, MinIO) — provider, bucket, region, endpoint, and access keys. Call this FIRST whenever the user wants object storage: image/file uploads for an app (purpose 'image-uploads') or off-site backup copies (purpose 'backups'). NEVER ask for access keys in plain chat — this form collects them with the secret masked. SECURITY: the tool writes the access keys straight to a root-only env file ON THE SERVER itself and returns you only its path (`envPath`) plus the non-secret values (bucket, region, endpoint) — you never receive the secret, so you cannot leak it. To use the keys, `source` the env file inside a runScript (see the setup-s3-storage skill); never re-collect, echo, or write the keys yourself. Requires `serverId`. If the user cancels, ask how they'd like to proceed instead.",
+      inputSchema: z.object({
+        serverId: z
+          .string()
+          .describe(
+            'The server the storage is set up on (from listServers). Required — the tool writes the credentials env file here.',
+          ),
+        purpose: z
+          .enum(['image-uploads', 'backups'])
+          .describe(
+            "'image-uploads' when an app will store uploaded images/files in the bucket; 'backups' when database backups will be copied there.",
+          ),
+        appName: z
+          .string()
+          .optional()
+          .describe(
+            'For image-uploads: the app the storage is for — shown in the form title.',
+          ),
+      }),
+      execute: async ({ serverId, purpose, appName }) => {
+        ensureAllowed(serverId);
+        const values = await ctx.requestForm(
+          buildS3StorageForm({ purpose, appName }),
+        );
+        if (!values) {
+          return {
+            submitted: false,
+            note: 'The user cancelled the storage setup form. Ask how they want to proceed.',
+          };
+        }
+        // main writes the keys directly to a root-only file on the server; the
+        // secret never round-trips through the model / the AI provider.
+        const stored = await ctx.writeS3Credentials({ serverId, purpose, values });
+        if (!stored.ok) {
+          return {
+            submitted: true,
+            secretStored: false,
+            error: stored.error ?? 'Failed to write the credentials file.',
+            note: 'The form was submitted but writing the credentials file failed. Diagnose (is the server connected? sudo available?) and retry, or ask the user how to proceed.',
+          };
+        }
+        // Return ONLY non-secret fields — the access keys live in envPath.
+        const nonSecret: Record<string, string> = {};
+        for (const [k, v] of Object.entries(values)) {
+          if (k !== 'accessKeyId' && k !== 'secretAccessKey') nonSecret[k] = v;
+        }
+        return {
+          submitted: true,
+          secretStored: true,
+          envPath: stored.envPath,
+          values: nonSecret,
+        };
+      },
+    }),
+
     updateTodos: tool({
       description:
-        "Maintain a visible task checklist for a multi-step job — the user watches it to see what is done and what is left. Call this at the START of any task that takes more than ~3 steps (a deploy, a security audit, hardening, a migration) to lay out the plan, then call it again EVERY time a step's status changes. Rules: pass the ENTIRE list every time (it replaces the previous one); keep EXACTLY ONE item 'in_progress' at a time; mark an item 'completed' the moment it's done before starting the next; keep item text short and action-oriented (\"Install nginx\", \"Configure TLS\"). Skip this tool for simple one-or-two-step requests — a checklist there is just noise.",
+        "Maintain a visible task checklist for a multi-step job — the user watches it to see what is done and what is left. Call this at the START of any task that takes more than ~3 steps (a deploy, a security audit, hardening, a migration) to lay out the plan, then call it again EVERY time a step's status changes. Rules: pass the ENTIRE list every time — this tool REPLACES the previous list, so an item you leave out is DELETED; keep EXACTLY ONE item 'in_progress' at a time; mark an item 'completed' the moment it's done before starting the next; keep item text short and action-oriented (\"Install nginx\", \"Configure TLS\"). If the conversation already has a task list (shown to you as 'Current task list'), carry ALL of those items forward with their existing statuses and continue from the first unfinished one — never restart or drop earlier tasks. Skip this tool for simple one-or-two-step requests — a checklist there is just noise.",
       inputSchema: z.object({
         todos: z
           .array(
@@ -452,6 +651,7 @@ export function buildTools(ctx: AgentToolContext) {
         'Get the most recent CPU, memory, disk and network stats for a server.',
       inputSchema: z.object({ serverId: z.string() }),
       execute: async ({ serverId }) => {
+        ensureAllowed(serverId);
         const stats = ctx.getStats(serverId);
         if (!stats)
           return {

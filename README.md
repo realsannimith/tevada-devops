@@ -46,19 +46,18 @@ Google Gemini.
    ```sh
    bun install
    ```
-3. Copy `.env.example` to `.env` and add your Google Gemini API key:
+3. Configure the AI provider **in the app**, not in `.env`. Launch it (step 4),
+   then open **Settings → AI Provider** and either paste an API key (stored
+   encrypted via the OS keychain) or sign in with a ChatGPT subscription from
+   the **Codex** section. Provider API keys are never read from `.env`.
+
+   Optional env config — copy `.env.example` to `.env` for non-key settings
+   (e.g. Google Drive sync, or one-click "Connect GitHub": register a GitHub
+   App and set `GITHUB_CLIENT_ID` + `GITHUB_APP_SLUG`, walkthrough in
+   `docs/github-app-setup.md`):
    ```sh
    cp .env.example .env
    ```
-   ```
-   GOOGLE_GENERATIVE_AI_API_KEY=your_key_here
-   # AGENT_MODEL=gemini-3.5-flash   # optional override
-   ```
-   Get a key at https://aistudio.google.com/apikey
-
-   Optional — one-click "Connect GitHub" with per-repo access: register a
-   GitHub App (5 minutes, no server needed) and set `GITHUB_CLIENT_ID` +
-   `GITHUB_APP_SLUG`. Walkthrough: `docs/github-app-setup.md`.
 4. Run in development:
    ```sh
    bun run dev

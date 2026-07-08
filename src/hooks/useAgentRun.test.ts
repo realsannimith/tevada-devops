@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { applyTodos } from './useAgentRun';
+import { applyTodos, resolveFormItem } from './useAgentRun';
 import type { ChatHistoryItem, TodoItem } from '@/shared/ipc-types';
 
 const text = (id: string): ChatHistoryItem => ({
@@ -53,5 +53,42 @@ describe('applyTodos', () => {
     const out = applyTodos(feed, TODOS_A);
     expect(feed).toHaveLength(1);
     expect(out).not.toBe(feed);
+  });
+});
+
+describe('resolveFormItem', () => {
+  const feedWithForm = (): ChatHistoryItem[] => [
+    text('u'),
+    {
+      kind: 'form',
+      formId: 'f1',
+      title: 'Set up a domain',
+      fields: [{ key: 'domain', label: 'Domain', type: 'text' }],
+      status: 'pending',
+    },
+  ];
+
+  it('marks the matching form submitted and stamps its values', () => {
+    const out = resolveFormItem(feedWithForm(), 'f1', 'submitted', {
+      domain: 'app.example.com',
+    });
+    const form = out.find((i) => i.kind === 'form');
+    expect(form && form.kind === 'form' && form.status).toBe('submitted');
+    expect(form && form.kind === 'form' && form.values?.domain).toBe(
+      'app.example.com',
+    );
+  });
+
+  it('marks a cancelled form without values', () => {
+    const out = resolveFormItem(feedWithForm(), 'f1', 'cancelled');
+    const form = out.find((i) => i.kind === 'form');
+    expect(form && form.kind === 'form' && form.status).toBe('cancelled');
+    expect(form && form.kind === 'form' && form.values).toBeUndefined();
+  });
+
+  it('leaves other forms and items untouched', () => {
+    const out = resolveFormItem(feedWithForm(), 'other', 'submitted', {});
+    const form = out.find((i) => i.kind === 'form');
+    expect(form && form.kind === 'form' && form.status).toBe('pending');
   });
 });

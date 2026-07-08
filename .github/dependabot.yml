@@ -1,0 +1,35 @@
+# Dependabot: keep the security-relevant dependencies patched without hand-
+# tracking advisories. The app opens SSH sessions to production servers and runs
+# an LLM agent, so lagging on an Electron / ssh2 / AI-SDK security release has
+# direct exposure. Updates open PRs that the existing CI (lint/typecheck/test/
+# build) gates before anyone merges.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    labels:
+      - dependencies
+    groups:
+      # One PR for the security-critical runtime deps so they move together.
+      security-critical:
+        patterns:
+          - "electron"
+          - "ssh2"
+          - "sshpk"
+          - "ai"
+          - "@ai-sdk/*"
+      # Batch the noisier dev tooling so it doesn't flood the PR queue.
+      dev-tooling:
+        dependency-type: development
+        patterns:
+          - "*"
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    labels:
+      - dependencies

@@ -65,7 +65,7 @@ describe('parseSkill', () => {
 describe('bundledSkills', () => {
   it('every bundled skill parses with a unique name', () => {
     const skills = bundledSkills();
-    expect(skills.length).toBe(21);
+    expect(skills.length).toBe(24);
     const names = skills.map((s) => s.name);
     expect(new Set(names).size).toBe(names.length);
     for (const s of skills) {
@@ -74,6 +74,9 @@ describe('bundledSkills', () => {
     }
     expect(names).toContain('docker-deploy');
     expect(names).toContain('security-audit');
+    expect(names).toContain('setup-domain');
+    expect(names).toContain('setup-database-backup');
+    expect(names).toContain('setup-s3-storage');
   });
 });
 

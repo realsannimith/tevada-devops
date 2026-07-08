@@ -9,6 +9,7 @@ import { contextBridge, ipcRenderer } from 'electron';
 import {
   AgentEventEnvelope,
   AgentStartRequest,
+  AiKeyStatus,
   AlertEvent,
   AlertsStatus,
   AppSettings,
@@ -19,6 +20,8 @@ import {
   ChatHistoryChangedEvent,
   ChatHistoryState,
   ChatSession,
+  CodexAuthEvent,
+  CodexStatus,
   ContainerCredentialGuess,
   DatabaseCredential,
   DatabaseCredentialMeta,
@@ -27,6 +30,10 @@ import {
   EnvFileReadResult,
   OkResult,
   GeneratedKey,
+  GoogleDriveAuthEvent,
+  GoogleDriveRestoreResult,
+  GoogleDriveStatus,
+  GoogleDriveSyncResult,
   GithubAuthEvent,
   GithubCloneResult,
   GithubDeviceFlowStart,
@@ -36,18 +43,21 @@ import {
   IPC,
   MonitorStatsEvent,
   PlaybookMeta,
+  Project,
   SaveDatabaseCredentialRequest,
   ServerAlertConfig,
   ServerProfile,
   ServerSecret,
   ServerWithStatus,
   SshStatusEvent,
+  SteerItem,
   TelegramChatDetectResult,
   TelegramConnectResult,
   TelegramTestResult,
   TermDataEvent,
   TermExitEvent,
 } from './shared/ipc-types';
+import { ProviderId } from './shared/providers';
 
 type AlertConfigPatch = Partial<{
   chatId: string | null;
@@ -85,6 +95,20 @@ const easyhost = {
       secret: ServerSecret,
     ): Promise<{ ok: boolean; error?: string }> =>
       ipcRenderer.invoke(IPC.serversTest, { profile, secret }),
+  },
+
+  projects: {
+    list: (): Promise<Project[]> => ipcRenderer.invoke(IPC.projectsList),
+    add: (
+      project: Pick<Project, 'name' | 'color' | 'memory'>,
+    ): Promise<Project> => ipcRenderer.invoke(IPC.projectsAdd, { project }),
+    update: (
+      id: string,
+      patch: Partial<Omit<Project, 'id' | 'createdAt'>>,
+    ): Promise<Project | null> =>
+      ipcRenderer.invoke(IPC.projectsUpdate, { id, patch }),
+    remove: (projectId: string): Promise<{ ok: boolean }> =>
+      ipcRenderer.invoke(IPC.projectsRemove, { projectId }),
   },
 
   keys: {
@@ -141,6 +165,16 @@ const easyhost = {
       ipcRenderer.invoke(IPC.agentCancel, { runId }),
     approve: (approvalId: string, approved: boolean): Promise<{ ok: boolean }> =>
       ipcRenderer.invoke(IPC.agentApprove, { approvalId, approved }),
+    respondForm: (
+      formId: string,
+      values: Record<string, string> | null,
+    ): Promise<{ ok: boolean }> =>
+      ipcRenderer.invoke(IPC.agentRespondForm, { formId, values }),
+    steer: (
+      runId: string,
+      items: SteerItem[],
+    ): Promise<{ accepted: boolean }> =>
+      ipcRenderer.invoke(IPC.agentSteer, { runId, items }),
     model: (): Promise<string> => ipcRenderer.invoke(IPC.agentModel),
     onEvent: (cb: (e: AgentEventEnvelope) => void) =>
       on<AgentEventEnvelope>(IPC.evtAgentEvent, cb),
@@ -154,6 +188,8 @@ const easyhost = {
       ipcRenderer.invoke(IPC.chatHistorySetActive, id),
     setPinned: (id: string, pinned: boolean): Promise<ChatHistoryState> =>
       ipcRenderer.invoke(IPC.chatHistorySetPinned, id, pinned),
+    rename: (id: string, title: string): Promise<ChatHistoryState> =>
+      ipcRenderer.invoke(IPC.chatHistoryRename, id, title),
     delete: (id: string): Promise<ChatHistoryState> =>
       ipcRenderer.invoke(IPC.chatHistoryDelete, id),
     onChanged: (cb: (state: ChatHistoryChangedEvent) => void) =>
@@ -164,6 +200,24 @@ const easyhost = {
     get: (): Promise<AppSettings> => ipcRenderer.invoke(IPC.settingsGet),
     set: (patch: Partial<AppSettings>): Promise<AppSettings> =>
       ipcRenderer.invoke(IPC.settingsSet, patch),
+  },
+
+  ai: {
+    keyStatus: (): Promise<AiKeyStatus> => ipcRenderer.invoke(IPC.aiKeyStatus),
+    setKey: (provider: ProviderId, key: string): Promise<AiKeyStatus> =>
+      ipcRenderer.invoke(IPC.aiKeySet, { provider, key }),
+    clearKey: (provider: ProviderId): Promise<AiKeyStatus> =>
+      ipcRenderer.invoke(IPC.aiKeyClear, { provider }),
+  },
+
+  codex: {
+    status: (): Promise<CodexStatus> => ipcRenderer.invoke(IPC.codexStatus),
+    login: (): Promise<{ ok: boolean; error?: string }> =>
+      ipcRenderer.invoke(IPC.codexLogin),
+    cancel: (): Promise<{ ok: boolean }> => ipcRenderer.invoke(IPC.codexCancel),
+    logout: (): Promise<CodexStatus> => ipcRenderer.invoke(IPC.codexLogout),
+    onAuthEvent: (cb: (e: CodexAuthEvent) => void) =>
+      on<CodexAuthEvent>(IPC.evtCodexAuth, cb),
   },
 
   playbooks: {
@@ -246,6 +300,27 @@ const easyhost = {
       ipcRenderer.invoke(IPC.githubClone, { serverId, repoFullName, destPath }),
     onAuthEvent: (cb: (e: GithubAuthEvent) => void) =>
       on<GithubAuthEvent>(IPC.evtGithubAuth, cb),
+  },
+
+  googleDrive: {
+    status: (): Promise<GoogleDriveStatus> =>
+      ipcRenderer.invoke(IPC.googleDriveStatus),
+    login: (): Promise<{ ok: boolean; error?: string }> =>
+      ipcRenderer.invoke(IPC.googleDriveLogin),
+    cancel: (): Promise<{ ok: boolean }> =>
+      ipcRenderer.invoke(IPC.googleDriveCancel),
+    disconnect: (): Promise<GoogleDriveStatus> =>
+      ipcRenderer.invoke(IPC.googleDriveDisconnect),
+    syncNow: (): Promise<GoogleDriveSyncResult> =>
+      ipcRenderer.invoke(IPC.googleDriveSyncNow),
+    restore: (): Promise<GoogleDriveRestoreResult> =>
+      ipcRenderer.invoke(IPC.googleDriveRestore),
+    keepLocal: (): Promise<GoogleDriveSyncResult> =>
+      ipcRenderer.invoke(IPC.googleDriveKeepLocal),
+    onAuthEvent: (cb: (e: GoogleDriveAuthEvent) => void) =>
+      on<GoogleDriveAuthEvent>(IPC.evtGoogleDriveAuth, cb),
+    onStatusChange: (cb: (s: GoogleDriveStatus) => void) =>
+      on<GoogleDriveStatus>(IPC.evtGoogleDriveStatus, cb),
   },
 
   alerts: {

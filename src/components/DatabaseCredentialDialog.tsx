@@ -13,6 +13,16 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -92,6 +102,7 @@ function ViewCredential({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [showPassword, setShowPassword] = useState(false);
+  const [confirmForget, setConfirmForget] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -212,13 +223,37 @@ function ViewCredential({
           variant="ghost"
           size="sm"
           className="text-destructive hover:text-destructive"
-          onClick={forget}
+          onClick={() => setConfirmForget(true)}
           disabled={!credential}
         >
           <TrashIcon className="size-3.5" />
           Forget credentials
         </Button>
       </div>
+
+      <AlertDialog open={confirmForget} onOpenChange={setConfirmForget}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Forget these credentials?</AlertDialogTitle>
+            <AlertDialogDescription>
+              The saved credentials for this database are deleted from this
+              device. The database itself is not affected. This can’t be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              variant="destructive"
+              onClick={() => {
+                setConfirmForget(false);
+                void forget();
+              }}
+            >
+              Forget credentials
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </>
   );
 }

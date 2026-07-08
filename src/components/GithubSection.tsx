@@ -9,8 +9,8 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Button } from '@/components/ui/button';
+import { ConfirmButton } from '@/components/ConfirmButton';
 import { Input } from '@/components/ui/input';
-import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
 import { useServers } from '@/hooks/useServers';
 import { GithubIcon } from '@/lib/brand-icons';
@@ -199,15 +199,6 @@ export function GithubSection() {
 
   return (
     <div className="grid gap-2">
-      <div className="pr-4">
-        <Label>GitHub</Label>
-        <p className="text-xs text-muted-foreground">
-          Connect your account and choose which repositories this app — and the
-          agent — can reach. Your servers can then clone them, including private
-          ones, during deploys.
-        </p>
-      </div>
-
       {!status ? (
         <div className="flex items-center gap-2 py-2 text-xs text-muted-foreground">
           <Loader2Icon className="size-3.5 animate-spin" /> Checking…
@@ -281,9 +272,17 @@ export function GithubSection() {
                     : ''}
               </p>
             </div>
-            <Button variant="outline" size="sm" onClick={disconnect} disabled={busy}>
+            <ConfirmButton
+              variant="outline"
+              size="sm"
+              disabled={busy}
+              confirmTitle="Disconnect GitHub?"
+              confirmDescription="The saved GitHub token is removed from this device and servers can no longer clone private repositories through EasyHost. You can reconnect anytime."
+              confirmLabel="Disconnect"
+              onConfirm={disconnect}
+            >
               Disconnect
-            </Button>
+            </ConfirmButton>
           </div>
 
           {/* Repository access (GitHub App installations) */}

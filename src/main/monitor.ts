@@ -35,7 +35,11 @@ type NetSample = { rx: number; tx: number; ts: number };
 
 type MonState = {
   timer: NodeJS.Timeout;
+  /** Current poll cadence; tracked so start() can reconfigure a live poller
+   *  when the user changes the interval in Settings instead of ignoring it. */
+  intervalMs: number;
   inFlight: boolean;
+  tick: () => Promise<void>;
   prevCpu?: CpuSample;
   prevNet?: NetSample;
 };
@@ -191,7 +195,20 @@ export class Monitor {
   }
 
   start(serverId: string, intervalMs: number): void {
-    if (this.states.has(serverId)) return;
+    const existing = this.states.get(serverId);
+    if (existing) {
+      // Already polling. Reconfigure the cadence if it changed (Settings →
+      // poll interval); otherwise this is a harmless no-op. Note: we keep a
+      // live timer across an unexpected SSH drop on purpose — each tick
+      // short-circuits while disconnected and resumes automatically once the
+      // connection is back.
+      if (existing.intervalMs !== intervalMs) {
+        clearInterval(existing.timer);
+        existing.intervalMs = intervalMs;
+        existing.timer = setInterval(existing.tick, intervalMs);
+      }
+      return;
+    }
     const tick = async () => {
       const st = this.states.get(serverId);
       if (!st || st.inFlight) return;
@@ -199,7 +216,7 @@ export class Monitor {
       st.inFlight = true;
       try {
         const res = await this.cm.exec(serverId, PROBE, {
-          timeoutMs: Math.max(8000, intervalMs * 2),
+          timeoutMs: Math.max(8000, st.intervalMs * 2),
           maxOutputBytes: 128 * 1024,
         });
         const { stats, cpu, net } = parseStats(
@@ -220,8 +237,16 @@ export class Monitor {
       }
     };
     const timer = setInterval(tick, intervalMs);
-    this.states.set(serverId, { timer, inFlight: false });
+    this.states.set(serverId, { timer, intervalMs, inFlight: false, tick });
     void tick();
+  }
+
+  /** Apply a new poll cadence to every live poller (e.g. the user changed the
+   *  interval in Settings). start() reconfigures each existing poller in place. */
+  reconfigureAll(intervalMs: number): void {
+    for (const serverId of [...this.states.keys()]) {
+      this.start(serverId, intervalMs);
+    }
   }
 
   stop(serverId: string): void {

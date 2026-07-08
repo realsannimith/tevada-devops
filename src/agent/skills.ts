@@ -23,6 +23,9 @@ import { nextToolCallId } from './tools';
 import dockerDeploy from './skills/docker-deploy/SKILL.md?raw';
 import dockerComposeStack from './skills/docker-compose-stack/SKILL.md?raw';
 import reverseProxyTls from './skills/reverse-proxy-tls/SKILL.md?raw';
+import setupDomain from './skills/setup-domain/SKILL.md?raw';
+import setupDatabaseBackup from './skills/setup-database-backup/SKILL.md?raw';
+import setupS3Storage from './skills/setup-s3-storage/SKILL.md?raw';
 import dockerMaintenance from './skills/docker-maintenance/SKILL.md?raw';
 import serverHardening from './skills/server-hardening/SKILL.md?raw';
 import securityAudit from './skills/security-audit/SKILL.md?raw';
@@ -56,6 +59,9 @@ const BUNDLED_RAW = [
   dockerDeploy,
   dockerComposeStack,
   reverseProxyTls,
+  setupDomain,
+  setupDatabaseBackup,
+  setupS3Storage,
   dockerMaintenance,
   serverHardening,
   securityAudit,

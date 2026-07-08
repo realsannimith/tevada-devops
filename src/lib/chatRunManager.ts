@@ -13,17 +13,21 @@ import { useSyncExternalStore } from 'react';
 import {
   applyTodos,
   formatAgentToolResult,
+  resolveFormItem,
   type PendingApproval,
   type RunOutcome,
 } from '@/hooks/useAgentRun';
 import { CHAT_HISTORY_UPDATED_EVENT } from '@/lib/chatHistory';
+import { feedToMessages } from '@/lib/chatMessages';
 import { publishRunStatus } from '@/lib/runStatus';
 import type {
   AgentEvent,
   AgentStartRequest,
+  ChatAttachment,
   ChatHistoryItem,
   ChatSession,
   ChatSessionStatus,
+  SteerItem,
 } from '@/shared/ipc-types';
 
 export type ChatRunSnapshot = {
@@ -43,10 +47,17 @@ type RunEntry = {
   assistantId: string | null;
   sawError: boolean;
   targetServerId: string | null;
+  projectId: string | null;
   createdAt: number;
   saveTimer: number | null;
   firstPendingAt: number | null;
   pendingSession: ChatSession | null;
+  /** A steer arrived after the run's last step (unconsumed) — resend it as a
+   *  fresh turn once this run settles. */
+  resendOnDone: boolean;
+  /** A thinking block just closed — the next reasoning delta starts a new
+   *  paragraph inside the same card (see useAgentRun's reducer). */
+  reasoningEnded: boolean;
 };
 
 const entries = new Map<string, RunEntry>();
@@ -112,6 +123,31 @@ function reduce(sessionId: string, event: AgentEvent): void {
       entry.snapshot = { ...snap, feed };
       break;
     }
+    case 'reasoning-delta': {
+      const sep = entry.reasoningEnded;
+      entry.reasoningEnded = false;
+      const feed = snap.feed.slice();
+      const last = feed[feed.length - 1];
+      // Contiguous thinking accumulates into one card; any text/tool item in
+      // between starts a fresh card.
+      if (last && last.kind === 'reasoning') {
+        feed[feed.length - 1] = {
+          ...last,
+          content: last.content + (sep ? '\n\n' : '') + event.text,
+        };
+      } else {
+        feed.push({
+          kind: 'reasoning',
+          id: `r_${Date.now()}_${Math.random().toString(36).slice(2)}`,
+          content: event.text,
+        });
+      }
+      entry.snapshot = { ...snap, feed };
+      break;
+    }
+    case 'reasoning-end':
+      entry.reasoningEnded = true;
+      break;
     case 'tool-start':
       entry.assistantId = null; // next text starts a fresh bubble
       entry.snapshot = {
@@ -153,8 +189,33 @@ function reduce(sessionId: string, event: AgentEvent): void {
       entry.assistantId = null; // next text starts a fresh bubble
       entry.snapshot = { ...snap, feed: applyTodos(snap.feed, event.todos) };
       break;
+    case 'form-required':
+      entry.assistantId = null; // next text starts a fresh bubble
+      entry.snapshot = {
+        ...snap,
+        feed: [
+          ...snap.feed,
+          {
+            kind: 'form',
+            formId: event.form.formId,
+            title: event.form.title,
+            description: event.form.description,
+            submitLabel: event.form.submitLabel,
+            fields: event.form.fields,
+            dnsGuide: event.form.dnsGuide,
+            status: 'pending',
+          },
+        ],
+      };
+      break;
     case 'usage':
       entry.snapshot = { ...snap, tokens: event.totalTokens };
+      break;
+    case 'steer-unconsumed':
+      // The steer text is already echoed in the feed (steer() added it); the
+      // run just ended before injecting it. Resend from the feed once 'done'
+      // settles this run to running:false.
+      entry.resendOnDone = true;
       break;
     case 'approval-required':
       entry.snapshot = {
@@ -179,6 +240,11 @@ function reduce(sessionId: string, event: AgentEvent): void {
         running: false,
         outcome: entry.sawError ? 'error' : 'done',
       };
+      if (entry.resendOnDone) {
+        entry.resendOnDone = false;
+        // After this reduce's notify/save settle the run to idle.
+        window.setTimeout(() => resendSteers(sessionId), 0);
+      }
       break;
     case 'cancelled':
       if (entry.runId) runIdToSession.delete(entry.runId);
@@ -205,6 +271,44 @@ function reduce(sessionId: string, event: AgentEvent): void {
   notify();
 }
 
+/**
+ * Resend the steer message(s) — already echoed at the tail of the feed — as a
+ * fresh turn, used when a steer couldn't be injected because the run had ended.
+ * The transcript's last user message(s) ARE the steer, so we rebuild the model
+ * messages straight from the feed (no new echo).
+ */
+function resendSteers(sessionId: string): void {
+  const entry = entries.get(sessionId);
+  if (!entry || entry.snapshot.running) return; // a run is (again) live
+  const feed = entry.snapshot.feed;
+  const messages = feedToMessages(feed).slice(-40);
+  if (messages.length === 0) return;
+  const lastUser = [...feed]
+    .reverse()
+    .find((i): i is Extract<ChatHistoryItem, { kind: 'text' }> =>
+      i.kind === 'text' && i.role === 'user',
+    );
+  const attachments = lastUser?.attachments;
+  const todos = feed.find((i) => i.kind === 'todos');
+  void chatRunManager.start({
+    sessionId,
+    baseItems: feed,
+    echoUser: false,
+    targetServerId: entry.targetServerId,
+    projectId: entry.projectId,
+    createdAt: entry.createdAt,
+    userEcho: '',
+    attachments,
+    req: {
+      messages,
+      attachments: attachments?.length ? attachments : undefined,
+      serverIds: entry.targetServerId ? [entry.targetServerId] : undefined,
+      projectId: entry.projectId,
+      todos: todos && todos.kind === 'todos' && todos.todos.length ? todos.todos : undefined,
+    },
+  });
+}
+
 function buildSession(entry: RunEntry): ChatSession {
   const snap = entry.snapshot;
   const status: ChatSessionStatus = snap.running
@@ -215,7 +319,9 @@ function buildSession(entry: RunEntry): ChatSession {
     kind: 'chat',
     status,
     items: snap.feed,
+    tokens: snap.tokens > 0 ? snap.tokens : undefined,
     targetServerId: entry.targetServerId,
+    projectId: entry.projectId,
     createdAt: entry.createdAt,
     updatedAt: Date.now(),
   };
@@ -261,19 +367,38 @@ export const chatRunManager = {
     sessionId: string;
     baseItems: ChatHistoryItem[];
     targetServerId: string | null;
+    projectId: string | null;
     createdAt: number;
     req: AgentStartRequest;
     userEcho: string;
+    /** Files/images the user attached to this turn — shown on the user bubble
+     *  and sent to the model as multimodal content (via req.attachments). */
+    attachments?: ChatAttachment[];
+    /** When false, `baseItems` is used as-is (the user bubble is already in it —
+     *  e.g. a steer fallback where the steer message was echoed earlier). */
+    echoUser?: boolean;
   }): Promise<void> {
     ensureWired();
     if (entries.get(opts.sessionId)?.snapshot.running) return; // one run per session
+    const feed: ChatHistoryItem[] =
+      opts.echoUser === false
+        ? [...opts.baseItems]
+        : [
+            ...opts.baseItems,
+            {
+              kind: 'text',
+              id: `u_${Date.now()}`,
+              role: 'user',
+              content: opts.userEcho,
+              attachments: opts.attachments?.length
+                ? opts.attachments
+                : undefined,
+            },
+          ];
     const entry: RunEntry = {
       snapshot: {
         sessionId: opts.sessionId,
-        feed: [
-          ...opts.baseItems,
-          { kind: 'text', id: `u_${Date.now()}`, role: 'user', content: opts.userEcho },
-        ],
+        feed,
         running: true,
         tokens: 0,
         error: null,
@@ -284,10 +409,13 @@ export const chatRunManager = {
       assistantId: null,
       sawError: false,
       targetServerId: opts.targetServerId,
+      projectId: opts.projectId,
       createdAt: opts.createdAt,
       saveTimer: null,
       firstPendingAt: null,
       pendingSession: null,
+      resendOnDone: false,
+      reasoningEnded: false,
     };
     entries.set(opts.sessionId, entry);
     scheduleSave(opts.sessionId); // History shows "Running…" right away
@@ -323,6 +451,39 @@ export const chatRunManager = {
     if (entry?.runId) void window.easyhost.agent.cancel(entry.runId);
   },
 
+  /**
+   * Steer a live run: echo the message into the transcript (with the "steer"
+   * marker) and inject it into the running turn so the agent redirects without
+   * aborting its work. If the run already ended, fall back to a fresh turn so
+   * the message is never lost.
+   */
+  async steer(sessionId: string, item: SteerItem): Promise<void> {
+    const entry = entries.get(sessionId);
+    if (!entry) return;
+    entry.snapshot = {
+      ...entry.snapshot,
+      feed: [
+        ...entry.snapshot.feed,
+        {
+          kind: 'text',
+          id: `s_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+          role: 'user',
+          content: item.text,
+          attachments: item.attachments?.length ? item.attachments : undefined,
+          dispatchMode: 'steer',
+        },
+      ],
+    };
+    scheduleSave(sessionId);
+    notify();
+    if (entry.runId) {
+      const { accepted } = await window.easyhost.agent.steer(entry.runId, [item]);
+      if (accepted) return; // prepareStep will fold it into the live run
+    }
+    // The run already ended — resend the steer(s) as a fresh continuation turn.
+    resendSteers(sessionId);
+  },
+
   async respondApproval(sessionId: string, approved: boolean): Promise<void> {
     const entry = entries.get(sessionId);
     const approval = entry?.snapshot.approval;
@@ -330,6 +491,30 @@ export const chatRunManager = {
     await window.easyhost.agent.approve(approval.approvalId, approved);
     entry.snapshot = { ...entry.snapshot, approval: null };
     notify();
+  },
+
+  /** Submit (values) or cancel (null) an in-chat form. Settles the form item in
+   *  the feed and unblocks the paused run in main. */
+  async respondForm(
+    sessionId: string,
+    formId: string,
+    values: Record<string, string> | null,
+  ): Promise<void> {
+    const entry = entries.get(sessionId);
+    if (entry) {
+      entry.snapshot = {
+        ...entry.snapshot,
+        feed: resolveFormItem(
+          entry.snapshot.feed,
+          formId,
+          values ? 'submitted' : 'cancelled',
+          values ?? undefined,
+        ),
+      };
+      scheduleSave(sessionId);
+      notify();
+    }
+    await window.easyhost.agent.respondForm(formId, values);
   },
 
   /** Stop tracking (and stop) a session's run WITHOUT a final save — used when
