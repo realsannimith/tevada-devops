@@ -33,6 +33,19 @@ Grab the latest release for your OS from the
 Every release is built from source in public on GitHub Actions — check the
 [build logs](https://github.com/realsannimith/tevada-devops/actions) for any release.
 
+> **macOS first launch** — releases aren't notarized by Apple yet (no paid
+> developer account), so Gatekeeper warns on first open. If macOS says the app
+> is *"damaged"* or from an *"unverified developer"*, clear the quarantine flag
+> and open normally:
+>
+> ```sh
+> xattr -cr "/Applications/Tevada DevOps.app"
+> ```
+>
+> Or: right-click the app → **Open**, or allow it under
+> **System Settings → Privacy & Security → Open Anyway**. You only need this
+> once per install.
+
 ## Why Tevada DevOps?
 
 - 🤖 **The agent does the work** — hosting, TLS, backups, debugging: it plans,

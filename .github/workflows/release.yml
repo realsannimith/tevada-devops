@@ -196,5 +196,11 @@ jobs:
           tag_name: ${{ needs.preflight.outputs.tag }}
           name: Tevada DevOps v${{ needs.preflight.outputs.version }}
           generate_release_notes: true
+          body: |
+            > **macOS first launch:** builds are not notarized by Apple yet, so
+            > Gatekeeper warns on first open. Clear the quarantine flag once —
+            > `xattr -cr "/Applications/Tevada DevOps.app"` — or right-click the
+            > app → **Open** / System Settings → Privacy & Security → **Open
+            > Anyway**.
           files: release-assets/*
           fail_on_unmatched_files: false

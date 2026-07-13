@@ -8,6 +8,7 @@ import { AutoUnpackNativesPlugin } from '@electron-forge/plugin-auto-unpack-nati
 import { VitePlugin } from '@electron-forge/plugin-vite';
 import { FusesPlugin } from '@electron-forge/plugin-fuses';
 import { FuseV1Options, FuseVersion } from '@electron/fuses';
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -78,6 +79,35 @@ const config: ForgeConfig = {
     ...(process.platform === 'linux' ? { executableName: 'tevada-devops' } : {}),
   },
   rebuildConfig: {},
+  hooks: {
+    // Ad-hoc re-sign the whole bundle on macOS ('-' = no Developer ID).
+    // Packaging modifies the app (name/icon/resources), which breaks
+    // Electron's original code-signing seal — Gatekeeper reports an app with
+    // a BROKEN signature as "damaged" with no override. A consistent deep
+    // ad-hoc signature downgrades that to the "unverified developer" flow
+    // users can bypass (see README). osxSign/@electron/osx-sign is NOT used:
+    // it left the nested Electron Framework with a mismatched Team ID and the
+    // app died at launch (dyld refuses the framework). `codesign --deep`
+    // re-signs every nested binary consistently — verified locally by
+    // launching the packaged app. Replace with Developer ID + notarization
+    // when an Apple account is available.
+    postPackage: async (_config, result) => {
+      if (result.platform !== 'darwin') return;
+      for (const outputPath of result.outputPaths) {
+        const appBundle = fs
+          .readdirSync(outputPath)
+          .find((name) => name.endsWith('.app'));
+        if (!appBundle) continue;
+        execFileSync('codesign', [
+          '--force',
+          '--deep',
+          '--sign',
+          '-',
+          path.join(outputPath, appBundle),
+        ]);
+      }
+    },
+  },
   makers: [
     new MakerSquirrel({}),
     // DMG is the installer Mac users expect; keep the ZIP too for
