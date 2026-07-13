@@ -17,8 +17,23 @@ export const CHAT_HISTORY_UPDATED_EVENT = 'easyhost:chat-history-updated';
 /** Dispatched by the sidebar when a saved session is picked, so the always-mounted
  *  ChatPanel can hot-swap its feed without a remount. */
 export const CHAT_SESSION_SWITCH_EVENT = 'easyhost:chat-session-switch';
-/** Dispatched by the sidebar's "New chat" button; the ChatPanel starts a fresh draft. */
+/** Dispatched by the sidebar's "New chat" button; the ChatPanel starts a fresh draft.
+ *  Detail (optional) pre-scopes the draft to a project — the folder "+" action. */
 export const CHAT_NEW_SESSION_EVENT = 'easyhost:chat-new-session';
+
+export type ChatNewSessionDetail = {
+  projectId?: string;
+};
+
+/** Dispatched by the sidebar after "Move to project", so an open ChatPanel can
+ *  mirror the move into its project picker (its debounced saves carry projectId,
+ *  and a stale picker would silently move the chat right back). */
+export const CHAT_PROJECT_CHANGED_EVENT = 'easyhost:chat-project-changed';
+
+export type ChatProjectChangedDetail = {
+  id: string;
+  projectId: string | null;
+};
 /** Dispatched when a saved wizard run is picked, so the always-mounted
  *  WizardsView can open that run's transcript. */
 export const WIZARD_SESSION_SWITCH_EVENT = 'easyhost:wizard-session-switch';

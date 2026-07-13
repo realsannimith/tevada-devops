@@ -729,6 +729,22 @@ export function setChatSessionPinned(id: string, pinned: boolean): ChatHistorySt
   return chatState(data);
 }
 
+/** Files a session under a project (null = untagged). Owned by the sidebar's
+ *  "Move to project" action; the ChatPanel's own saves carry projectId too, so
+ *  it mirrors the change into its picker when the moved chat is the open one. */
+export function setChatSessionProject(
+  id: string,
+  projectId: string | null,
+): ChatHistoryState {
+  const data = read();
+  const session = data.chatSessions.find((s) => s.id === id);
+  if (session) {
+    session.projectId = projectId ?? undefined;
+    write(data);
+  }
+  return chatState(data);
+}
+
 /** Switches the active session pointer without touching any session's content. */
 export function setActiveChatSession(id: string | null): ChatHistoryState {
   const data = read();

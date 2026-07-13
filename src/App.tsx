@@ -9,6 +9,7 @@ import { ChatPanel } from '@/components/ChatPanel';
 import { DashboardView } from '@/components/DashboardView';
 import { WizardsView } from '@/components/WizardsView';
 import { TerminalView } from '@/components/TerminalView';
+import { FilesView } from '@/components/FilesView';
 import { MonitoringView } from '@/components/MonitoringView';
 import { ArtifactsView } from '@/components/ArtifactsView';
 import { DeploymentsView } from '@/components/DeploymentsView';
@@ -24,7 +25,12 @@ import {
 import { cn } from '@/lib/utils';
 import type { ConnStatus } from '@/shared/ipc-types';
 
-export type ServerTab = 'terminal' | 'monitoring' | 'artifacts' | 'deploys';
+export type ServerTab =
+  | 'terminal'
+  | 'files'
+  | 'monitoring'
+  | 'artifacts'
+  | 'deploys';
 
 export type View =
   | { kind: 'server'; serverId: string; tab: ServerTab }
@@ -203,6 +209,7 @@ function ServerPane({
           >
             <TabsList>
               <TabsTrigger value="terminal">Terminal</TabsTrigger>
+              <TabsTrigger value="files">Files</TabsTrigger>
               <TabsTrigger value="monitoring">Monitoring</TabsTrigger>
               <TabsTrigger value="artifacts">Artifacts</TabsTrigger>
               <TabsTrigger value="deploys">Deploys</TabsTrigger>
@@ -232,6 +239,8 @@ function ServerPane({
       <div className="flex-1 overflow-hidden">
         {view.tab === 'terminal' ? (
           <TerminalView serverId={server.id} />
+        ) : view.tab === 'files' ? (
+          <FilesView serverId={server.id} />
         ) : view.tab === 'monitoring' ? (
           <MonitoringView serverId={server.id} />
         ) : view.tab === 'deploys' ? (

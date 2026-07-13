@@ -220,9 +220,8 @@ function ViewCredential({
 
       <div className="-mx-5 -mb-5 flex items-center justify-between rounded-b-2xl border-t border-border bg-muted/40 px-5 py-3">
         <Button
-          variant="ghost"
+          variant="destructive"
           size="sm"
-          className="text-destructive hover:text-destructive"
           onClick={() => setConfirmForget(true)}
           disabled={!credential}
         >

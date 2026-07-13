@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type MouseEvent } from "react";
+import { useTheme } from "next-themes";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -21,14 +22,8 @@ import {
   DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import appIcon from "@/assets/app-icon.png";
+import appIcon from "@/assets/app-icon-v9-transparent.png";
+import darkAppIcon from "@/assets/app-icon-v9-dark.png";
 import { SidebarLeadingIcon } from "@/components/SidebarLeadingIcon";
 import { SidebarGlyph } from "@/components/sidebarGlyphs";
 import { BrailleSpinner } from "@/components/chat/RunningStatus";
@@ -38,15 +33,18 @@ import { useProjects } from "@/hooks/useProjects";
 import {
   CHAT_HISTORY_UPDATED_EVENT,
   CHAT_NEW_SESSION_EVENT,
+  CHAT_PROJECT_CHANGED_EVENT,
   CHAT_SESSION_SWITCH_EVENT,
   SESSION_STATUS_META,
   WIZARD_SESSION_SWITCH_EVENT,
   summarizeChatHistory,
   type ChatHistorySummary,
+  type ChatNewSessionDetail,
 } from "@/lib/chatHistory";
 import { chatRunManager } from "@/lib/chatRunManager";
 import {
   ChartBarIcon,
+  ChatBubbleIcon,
   ChevronRightIcon,
   ClockIcon,
   EllipsisIcon,
@@ -54,14 +52,11 @@ import {
   FolderOpenIcon,
   FolderPlusIcon,
   Loader2Icon,
-  PencilIcon,
   PinFilledIcon,
-  PinIcon,
   PlusIcon,
   SettingsIcon,
   TerminalIcon,
   WizardsIcon,
-  XIcon,
 } from "@/lib/icons";
 import { cn } from "@/lib/utils";
 import type {
@@ -72,9 +67,6 @@ import type {
 } from "@/shared/ipc-types";
 import type { View } from "@/App";
 
-const HISTORY_ALL = "__all__";
-const HISTORY_NONE = "__none__";
-
 /** Connection state shown by the terminal glyph itself — tint for terminal
  *  states, spinner while connecting. No floating dots (product decision). */
 const STATUS_GLYPH_CLASS: Record<ConnStatus, string | undefined> = {
@@ -83,6 +75,14 @@ const STATUS_GLYPH_CLASS: Record<ConnStatus, string | undefined> = {
   error: "text-destructive",
   disconnected: undefined,
 };
+
+/** How many chats a project folder shows before folding the rest behind a
+ *  "more" row — keeps a chatty project from pushing the next folder off screen. */
+const MAX_VISIBLE_PROJECT_CHATS = 4;
+
+/** "list" = the roomy two-line row in the History section; "tree" = the
+ *  compact one-line row that sits inside a project folder next to servers. */
+type HistoryRowVariant = "list" | "tree";
 
 export function ServerSidebar({
   view,
@@ -101,6 +101,7 @@ export function ServerSidebar({
   onEditProject: (projectId: string) => void;
   onOpenSettings: () => void;
 }) {
+  const { resolvedTheme } = useTheme();
   const { servers, statusOf, connect, disconnect, remove, refresh } =
     useServers();
   const { projects, remove: removeProject } = useProjects();
@@ -120,13 +121,10 @@ export function ServerSidebar({
   // Server awaiting remove confirmation.
   const [pendingServerDelete, setPendingServerDelete] =
     useState<ServerWithStatus | null>(null);
-  // History project filter: HISTORY_ALL, HISTORY_NONE, or a project id.
-  const [historyFilter, setHistoryFilter] = useState<string>(HISTORY_ALL);
   // Project folders default to expanded; a project id lands here once collapsed.
   const [collapsedProjects, setCollapsedProjects] = useState<Set<string>>(
     () => new Set(),
   );
-
   const toggleProjectCollapsed = (projectId: string) => {
     setCollapsedProjects((prev) => {
       const next = new Set(prev);
@@ -135,11 +133,21 @@ export function ServerSidebar({
       return next;
     });
   };
+  // Folders show their newest chats and tuck the rest behind a "more" row;
+  // a project id lands here once the user opts into the full list.
+  const [expandedChatLists, setExpandedChatLists] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const toggleChatListExpanded = (projectId: string) => {
+    setExpandedChatLists((prev) => {
+      const next = new Set(prev);
+      if (next.has(projectId)) next.delete(projectId);
+      else next.add(projectId);
+      return next;
+    });
+  };
 
   const activeServerId = view.kind === "server" ? view.serverId : null;
-
-  const projectById = (id: string | null) =>
-    id ? (projects.find((p) => p.id === id) ?? null) : null;
 
   // Toggle a server's membership in a project (a server may be in several).
   const toggleServerProject = async (
@@ -154,11 +162,13 @@ export function ServerSidebar({
     await refresh();
   };
 
-  const visibleSessions = sessions.filter((s) => {
-    if (historyFilter === HISTORY_ALL) return true;
-    if (historyFilter === HISTORY_NONE) return s.projectId === null;
-    return s.projectId === historyFilter;
-  });
+  // A project's chats render inside its folder in the tree below; the History
+  // section only keeps what's untagged (or tagged to a deleted project).
+  const sessionsOfProject = (projectId: string) =>
+    sessions.filter((s) => s.projectId === projectId);
+  const ungroupedSessions = sessions.filter(
+    (s) => !s.projectId || !projects.some((p) => p.id === s.projectId),
+  );
 
   // Servers grouped for display: one bucket per project (a server appears under
   // every project it belongs to), plus an "Unassigned" bucket for the rest.
@@ -334,10 +344,35 @@ export function ServerSidebar({
     void window.easyhost.chatHistory.setActive(summary.id);
   };
 
-  /** Starts a fresh conversation — the current one stays saved in History. */
-  const newChat = () => {
+  /** Starts a fresh conversation — the current one stays saved in History.
+   *  With a projectId (a folder's "+"), the draft opens pre-scoped to it. */
+  const newChat = (projectId?: string) => {
     onNavigate({ kind: "chat" });
-    window.dispatchEvent(new CustomEvent(CHAT_NEW_SESSION_EVENT));
+    window.dispatchEvent(
+      new CustomEvent<ChatNewSessionDetail>(CHAT_NEW_SESSION_EVENT, {
+        detail: projectId ? { projectId } : undefined,
+      }),
+    );
+  };
+
+  /** Files a chat under a project (null = back to plain History). Broadcasts
+   *  the move so an open ChatPanel updates its project picker — otherwise its
+   *  next debounced save would quietly move the chat back. */
+  const moveSessionToProject = async (
+    summary: ChatHistorySummary,
+    projectId: string | null,
+  ) => {
+    if ((summary.projectId ?? null) === projectId) return;
+    const saved = await window.easyhost.chatHistory.setProject(
+      summary.id,
+      projectId,
+    );
+    applyChatState(saved);
+    window.dispatchEvent(
+      new CustomEvent(CHAT_PROJECT_CHANGED_EVENT, {
+        detail: { id: summary.id, projectId },
+      }),
+    );
   };
 
   const togglePin = async (summary: ChatHistorySummary, event: MouseEvent) => {
@@ -372,14 +407,38 @@ export function ServerSidebar({
     applyChatState(saved);
   };
 
+  const renderHistoryRow = (
+    summary: ChatHistorySummary,
+    variant: HistoryRowVariant = "list",
+  ) => (
+    <HistoryRow
+      key={summary.id}
+      variant={variant}
+      active={
+        summary.kind === "wizard"
+          ? view.kind === "wizards" && summary.id === activeWizardSessionId
+          : view.kind === "chat" && summary.id === activeSessionId
+      }
+      summary={summary}
+      projects={projects}
+      onClick={() => selectSession(summary)}
+      onTogglePin={(event) => togglePin(summary, event)}
+      onRename={(title) => void renameSession(summary, title)}
+      onMoveToProject={(projectId) =>
+        void moveSessionToProject(summary, projectId)
+      }
+      onDelete={() => setPendingDelete(summary)}
+    />
+  );
+
   return (
     <aside className="glass drag-region flex h-full w-60 shrink-0 flex-col border-r border-sidebar-border text-sidebar-foreground">
       <div className="flex items-center gap-2 px-4 pt-9 pb-3">
         <img
-          src={appIcon}
+          src={resolvedTheme === "dark" ? darkAppIcon : appIcon}
           alt=""
           aria-hidden
-          className="size-5 shrink-0 rounded-[5px]"
+          className="size-5 shrink-0"
         />
         <span className="text-[13px] font-semibold tracking-[-0.015em] text-ink">
           Tevada DevOps
@@ -397,7 +456,7 @@ export function ServerSidebar({
           active={view.kind === "chat"}
           icon={<SidebarGlyph icon={PlusIcon} variant="leading" />}
           label="New chat"
-          onClick={newChat}
+          onClick={() => newChat()}
         />
         <NavRow
           active={view.kind === "wizards"}
@@ -407,66 +466,22 @@ export function ServerSidebar({
         />
       </nav>
 
-      {sessions.length > 0 && (
+      {ungroupedSessions.length > 0 && (
         <>
           <div className="no-drag mt-5 flex items-center justify-between px-4 pb-1">
             <span className="text-[10px] font-medium tracking-[0.04em] text-muted-foreground uppercase">
               History
             </span>
-            <div className="flex items-center gap-1">
-              {projects.length > 0 && (
-                <Select value={historyFilter} onValueChange={setHistoryFilter}>
-                  <SelectTrigger
-                    size="sm"
-                    className="h-6 gap-1 border-none bg-transparent px-1 text-[10px] text-muted-foreground shadow-none hover:text-foreground"
-                    aria-label="Filter history by project"
-                  >
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent align="end">
-                    <SelectItem value={HISTORY_ALL}>All projects</SelectItem>
-                    <SelectItem value={HISTORY_NONE}>No project</SelectItem>
-                    {projects.map((p) => (
-                      <SelectItem key={p.id} value={p.id}>
-                        {p.name}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              )}
-              <button
-                onClick={newChat}
-                className="rounded-sm p-0.5 text-muted-foreground/60 transition-colors hover:bg-accent hover:text-foreground"
-                title="New chat"
-              >
-                <SidebarGlyph icon={PlusIcon} variant="chrome" />
-              </button>
-            </div>
+            <button
+              onClick={() => newChat()}
+              className="rounded-sm p-0.5 text-muted-foreground/60 transition-colors hover:bg-accent hover:text-foreground"
+              title="New chat"
+            >
+              <SidebarGlyph icon={PlusIcon} variant="chrome" />
+            </button>
           </div>
-          <div className="no-drag max-h-48 space-y-0.5 overflow-y-auto px-2">
-            {visibleSessions.length === 0 ? (
-              <p className="px-2 py-2 text-[11px] text-muted-foreground">
-                No chats in this project yet.
-              </p>
-            ) : (
-              visibleSessions.map((summary) => (
-                <HistoryRow
-                  key={summary.id}
-                  active={
-                    summary.kind === "wizard"
-                      ? view.kind === "wizards" &&
-                        summary.id === activeWizardSessionId
-                      : view.kind === "chat" && summary.id === activeSessionId
-                  }
-                  summary={summary}
-                  project={projectById(summary.projectId)}
-                  onClick={() => selectSession(summary)}
-                  onTogglePin={(event) => togglePin(summary, event)}
-                  onRename={(title) => void renameSession(summary, title)}
-                  onDelete={() => setPendingDelete(summary)}
-                />
-              ))
-            )}
+          <div className="no-drag max-h-64 space-y-0.5 overflow-y-auto px-2">
+            {ungroupedSessions.map((s) => renderHistoryRow(s))}
           </div>
         </>
       )}
@@ -525,11 +540,7 @@ export function ServerSidebar({
               onClick={() => {
                 const project = pendingProjectDelete;
                 setPendingProjectDelete(null);
-                if (project) {
-                  if (historyFilter === project.id)
-                    setHistoryFilter(HISTORY_ALL);
-                  void removeProject(project.id);
-                }
+                if (project) void removeProject(project.id);
               }}
             >
               Delete project
@@ -572,7 +583,7 @@ export function ServerSidebar({
 
       <div className="no-drag mt-5 flex items-center justify-between px-4 pb-1">
         <span className="text-[10px] font-medium tracking-[0.04em] text-muted-foreground uppercase">
-          Servers
+          {projects.length > 0 ? "Projects" : "Servers"}
         </span>
         <div className="flex items-center gap-1">
           <button
@@ -604,29 +615,62 @@ export function ServerSidebar({
           const members = servers.filter((s) =>
             s.projectIds?.includes(project.id),
           );
+          const projectSessions = sessionsOfProject(project.id);
           const expanded = !collapsedProjects.has(project.id);
+          // Newest few chats stay visible; the long tail folds behind "more"
+          // so a busy project doesn't push the next folder off screen.
+          const chatListExpanded = expandedChatLists.has(project.id);
+          const visibleSessions = chatListExpanded
+            ? projectSessions
+            : projectSessions.slice(0, MAX_VISIBLE_PROJECT_CHATS);
+          const hiddenChatCount =
+            projectSessions.length - visibleSessions.length;
           return (
             <div key={project.id} className="pt-0.5">
               <ProjectHeader
                 project={project}
                 serverCount={members.length}
+                chatCount={projectSessions.length}
                 expanded={expanded}
                 onToggle={() => toggleProjectCollapsed(project.id)}
+                onNewChat={() => newChat(project.id)}
                 onEdit={() => onEditProject(project.id)}
                 onDelete={() => setPendingProjectDelete(project)}
-                onFilterHistory={() => setHistoryFilter(project.id)}
               />
               {/* Members read as children of the folder: indented under the
                   folder glyph with a faint guide line, and hidden when the
-                  folder is collapsed. */}
+                  folder is collapsed. The project's chat history nests here
+                  too, right below its servers. */}
               {expanded && (
                 <div className="ml-[15px] mt-0.5 space-y-0.5 border-l border-sidebar-border/70 pl-1.5">
-                  {members.length === 0 ? (
-                    <p className="px-2 py-1 text-[10px] text-muted-foreground/70">
-                      No servers yet
+                  {members.length === 0 && projectSessions.length === 0 ? (
+                    <p className="px-2 py-1 text-[10px] leading-relaxed text-muted-foreground/70">
+                      Empty — add servers from their ⋯ menu, or press + for a
+                      project chat
                     </p>
                   ) : (
-                    members.map(renderServerRow)
+                    <>
+                      {members.map(renderServerRow)}
+                      {members.length > 0 && projectSessions.length > 0 && (
+                        <div className="mx-2 my-1 border-t border-sidebar-border/60" />
+                      )}
+                      {visibleSessions.map((s) => renderHistoryRow(s, "tree"))}
+                      {(hiddenChatCount > 0 ||
+                        (chatListExpanded &&
+                          projectSessions.length >
+                            MAX_VISIBLE_PROJECT_CHATS)) && (
+                        <button
+                          onClick={() => toggleChatListExpanded(project.id)}
+                          className="flex h-6 w-full items-center rounded-md px-2 text-[10px] text-muted-foreground/70 transition-colors hover:bg-accent hover:text-foreground"
+                        >
+                          <span className="pl-6">
+                            {hiddenChatCount > 0
+                              ? `${hiddenChatCount} more chat${hiddenChatCount === 1 ? "" : "s"}…`
+                              : "Show fewer chats"}
+                          </span>
+                        </button>
+                      )}
+                    </>
                   )}
                 </div>
               )}
@@ -672,25 +716,28 @@ export function ServerSidebar({
   );
 }
 
-/** A collapsible project header above its server group. Clicking it toggles
- *  the folder open/closed; a chevron + open/closed folder glyph advertise the
- *  state. Trailing actions menu handles edit memory / filter history / delete. */
+/** A collapsible project header above its server + chat group. Clicking it
+ *  toggles the folder open/closed; a chevron + open/closed folder glyph
+ *  advertise the state. The trailing count (servers + chats) yields to hover
+ *  actions: "+" starts a chat scoped to this project, ⋯ holds the rest. */
 function ProjectHeader({
   project,
   serverCount,
+  chatCount,
   expanded,
   onToggle,
+  onNewChat,
   onEdit,
   onDelete,
-  onFilterHistory,
 }: {
   project: Project;
   serverCount: number;
+  chatCount: number;
   expanded: boolean;
   onToggle: () => void;
+  onNewChat: () => void;
   onEdit: () => void;
   onDelete: () => void;
-  onFilterHistory: () => void;
 }) {
   return (
     <div className="group flex h-6 items-center gap-1 px-2">
@@ -724,9 +771,20 @@ function ProjectHeader({
           {project.name}
         </span>
       </button>
-      <span className="text-[10px] tabular-nums text-muted-foreground/70">
-        {serverCount}
+      <span
+        title={`${serverCount} server${serverCount === 1 ? "" : "s"} · ${chatCount} chat${chatCount === 1 ? "" : "s"}`}
+        className="text-[10px] tabular-nums text-muted-foreground/70 group-hover:hidden"
+      >
+        {serverCount + chatCount}
       </span>
+      <button
+        onClick={onNewChat}
+        title="New chat in this project"
+        aria-label="New chat in this project"
+        className="hidden rounded-sm p-0.5 text-muted-foreground/60 transition-colors hover:bg-accent hover:text-foreground group-hover:block"
+      >
+        <SidebarGlyph icon={PlusIcon} variant="chrome" />
+      </button>
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
           <button className="rounded-sm p-0.5 text-muted-foreground/60 opacity-0 transition-opacity hover:bg-accent hover:text-foreground group-hover:opacity-100 data-[state=open]:opacity-100">
@@ -734,11 +792,11 @@ function ProjectHeader({
           </button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end">
+          <DropdownMenuItem onClick={onNewChat}>
+            New chat in project
+          </DropdownMenuItem>
           <DropdownMenuItem onClick={onEdit}>
             Edit project &amp; memory
-          </DropdownMenuItem>
-          <DropdownMenuItem onClick={onFilterHistory}>
-            Show chats
           </DropdownMenuItem>
           <DropdownMenuSeparator />
           <DropdownMenuItem variant="destructive" onClick={onDelete}>
@@ -752,30 +810,37 @@ function ProjectHeader({
 
 function HistoryRow({
   active,
+  variant,
   summary,
-  project,
+  projects,
   onClick,
   onTogglePin,
   onRename,
+  onMoveToProject,
   onDelete,
 }: {
   active: boolean;
+  variant: HistoryRowVariant;
   summary: ChatHistorySummary;
-  /** The tagged project (if any), for the row's chip. */
-  project: Project | null;
+  /** All projects, for the "Move to project" submenu. */
+  projects: Project[];
   onClick: () => void;
   onTogglePin: (event: MouseEvent) => void;
   /** Commit an inline rename (already trimmed of the no-change case upstream). */
   onRename: (title: string) => void;
+  onMoveToProject: (projectId: string | null) => void;
   onDelete: () => void;
 }) {
   // Inline rename: the title swaps to an input; Enter/blur commits, Esc cancels.
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(summary.title);
   const inputRef = useRef<HTMLInputElement>(null);
+  // "Rename" is picked from the dropdown, which restores focus to its trigger
+  // as it closes — that would immediately blur (= commit) the fresh input. The
+  // flag defers editing to onCloseAutoFocus, where the restore is cancelable.
+  const renameRequested = useRef(false);
 
-  const startEditing = (event: MouseEvent) => {
-    event.stopPropagation();
+  const beginEditing = () => {
     setDraft(summary.title);
     setEditing(true);
     // Focus after the input mounts.
@@ -786,6 +851,152 @@ function HistoryRow({
     setEditing(false);
     if (draft.trim()) onRename(draft);
   };
+
+  const titleInput = (
+    <input
+      ref={inputRef}
+      value={draft}
+      onChange={(e) => setDraft(e.target.value)}
+      onClick={(e) => e.stopPropagation()}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") commit();
+        if (e.key === "Escape") setEditing(false);
+      }}
+      aria-label="Chat name"
+      className="block w-full rounded-sm border border-border bg-background px-1 py-0.5 text-xs font-medium text-foreground outline-none focus:border-ring"
+    />
+  );
+
+  // One quiet ⋯ menu holds every row action (matches server rows) — no more
+  // three-button pileup where delete sat a pixel away from pin.
+  const actionsMenu = (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <button
+          aria-label="Chat actions"
+          className="rounded-sm p-0.5 text-muted-foreground/60 opacity-0 transition-opacity hover:bg-accent hover:text-foreground focus-visible:opacity-100 group-hover/history:opacity-100 data-[state=open]:opacity-100"
+        >
+          <SidebarGlyph icon={EllipsisIcon} variant="chrome" />
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent
+        align="end"
+        onCloseAutoFocus={(event) => {
+          if (!renameRequested.current) return;
+          event.preventDefault();
+          renameRequested.current = false;
+          beginEditing();
+        }}
+      >
+        <DropdownMenuItem
+          onClick={() => {
+            renameRequested.current = true;
+          }}
+        >
+          Rename
+        </DropdownMenuItem>
+        <DropdownMenuItem onClick={(event) => onTogglePin(event)}>
+          {summary.pinned ? "Unpin" : "Pin"}
+        </DropdownMenuItem>
+        {projects.length > 0 && (
+          <DropdownMenuSub>
+            <DropdownMenuSubTrigger>Move to project</DropdownMenuSubTrigger>
+            <DropdownMenuSubContent>
+              <DropdownMenuCheckboxItem
+                checked={!summary.projectId}
+                onSelect={() => onMoveToProject(null)}
+              >
+                No project
+              </DropdownMenuCheckboxItem>
+              <DropdownMenuSeparator />
+              {projects.map((p) => (
+                <DropdownMenuCheckboxItem
+                  key={p.id}
+                  checked={summary.projectId === p.id}
+                  onSelect={() => onMoveToProject(p.id)}
+                >
+                  {p.name}
+                </DropdownMenuCheckboxItem>
+              ))}
+            </DropdownMenuSubContent>
+          </DropdownMenuSub>
+        )}
+        <DropdownMenuSeparator />
+        <DropdownMenuItem variant="destructive" onClick={onDelete}>
+          Delete
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+
+  // Pinned rows keep their pin visible (and unpinnable) without opening the menu.
+  const pinnedBadge = summary.pinned ? (
+    <button
+      onClick={onTogglePin}
+      title="Unpin this chat"
+      aria-label="Unpin this chat"
+      className="rounded-sm p-0.5 text-foreground/70 transition-colors hover:bg-accent hover:text-foreground"
+    >
+      <SidebarGlyph icon={PinFilledIcon} variant="chrome" />
+    </button>
+  ) : null;
+
+  if (variant === "tree") {
+    // Compact single-line row, sized to sit flush with server rows. Status
+    // lives in the leading glyph: braille spinner while running, a tinted
+    // status glyph for failed/stopped/interrupted, a chat bubble otherwise.
+    const statusMeta =
+      summary.status && summary.status !== "running" && summary.status !== "done"
+        ? SESSION_STATUS_META[summary.status]
+        : null;
+    return (
+      <div
+        className={cn(
+          "group/history flex h-7 items-center gap-2 rounded-md px-2 text-xs transition-colors",
+          active
+            ? "bg-black/[0.06] text-foreground dark:bg-white/[0.08]"
+            : "text-muted-foreground hover:bg-accent hover:text-foreground",
+        )}
+      >
+        <SidebarLeadingIcon
+          size="sm"
+          tone={active ? "text-inherit" : undefined}
+          className="relative"
+        >
+          {summary.status === "running" ? (
+            <BrailleSpinner className="text-skill" />
+          ) : (
+            <SidebarGlyph
+              icon={
+                statusMeta
+                  ? statusMeta.icon
+                  : summary.kind === "wizard"
+                    ? WizardsIcon
+                    : ChatBubbleIcon
+              }
+              variant="leading"
+              className={statusMeta?.iconClass}
+            />
+          )}
+        </SidebarLeadingIcon>
+        <button
+          onClick={onClick}
+          disabled={editing}
+          title={
+            statusMeta ? `${summary.title} — ${statusMeta.label}` : summary.title
+          }
+          className="min-w-0 flex-1 truncate text-left"
+        >
+          {editing ? titleInput : summary.title}
+        </button>
+        <div className="flex shrink-0 items-center gap-0.5">
+          {pinnedBadge}
+          {actionsMenu}
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div
@@ -822,32 +1033,10 @@ function HistoryRow({
         </SidebarLeadingIcon>
         <span className="min-w-0 flex-1">
           {editing ? (
-            <input
-              ref={inputRef}
-              value={draft}
-              onChange={(e) => setDraft(e.target.value)}
-              onClick={(e) => e.stopPropagation()}
-              onBlur={commit}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") commit();
-                if (e.key === "Escape") setEditing(false);
-              }}
-              aria-label="Chat name"
-              className="block w-full rounded-sm border border-border bg-background px-1 py-0.5 text-xs font-medium text-foreground outline-none focus:border-ring"
-            />
+            titleInput
           ) : (
             <span className="block truncate text-xs font-medium">
               {summary.title}
-            </span>
-          )}
-          {project && (
-            <span className="mt-0.5 flex items-center gap-1 truncate text-[10px] text-muted-foreground">
-              <span
-                aria-hidden
-                className="size-1.5 shrink-0 rounded-full"
-                style={{ backgroundColor: project.color ?? "currentColor" }}
-              />
-              <span className="truncate">{project.name}</span>
             </span>
           )}
           {summary.status === "running" ? (
@@ -866,42 +1055,8 @@ function HistoryRow({
         </span>
       </button>
       <div className="mt-0.5 flex shrink-0 items-start gap-0.5">
-        <button
-          onClick={startEditing}
-          title="Rename this chat"
-          aria-label="Rename this chat"
-          className="rounded-sm p-0.5 text-muted-foreground/60 opacity-0 transition-opacity hover:bg-accent hover:text-foreground focus-visible:opacity-100 group-hover/history:opacity-100"
-        >
-          <SidebarGlyph icon={PencilIcon} variant="chrome" />
-        </button>
-        <button
-          onClick={onTogglePin}
-          title={summary.pinned ? "Unpin this chat" : "Pin this chat"}
-          aria-label={summary.pinned ? "Unpin this chat" : "Pin this chat"}
-          aria-pressed={summary.pinned}
-          className={cn(
-            "rounded-sm p-0.5 transition-opacity hover:bg-accent hover:text-foreground",
-            summary.pinned
-              ? "text-foreground opacity-100"
-              : "text-muted-foreground/60 opacity-0 focus-visible:opacity-100 group-hover/history:opacity-100",
-          )}
-        >
-          <SidebarGlyph
-            icon={summary.pinned ? PinFilledIcon : PinIcon}
-            variant="chrome"
-          />
-        </button>
-        <button
-          onClick={(event) => {
-            event.stopPropagation();
-            onDelete();
-          }}
-          title="Delete this chat"
-          aria-label="Delete this chat"
-          className="rounded-sm p-0.5 text-muted-foreground/60 opacity-0 transition-opacity hover:bg-accent hover:text-foreground focus-visible:opacity-100 group-hover/history:opacity-100"
-        >
-          <SidebarGlyph icon={XIcon} variant="chrome" />
-        </button>
+        {pinnedBadge}
+        {actionsMenu}
       </div>
     </div>
   );

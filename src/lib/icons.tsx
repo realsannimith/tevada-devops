@@ -2,6 +2,8 @@ import { type CSSProperties, type FC, type SVGProps } from "react";
 import {
   IconAlertTriangle,
   IconArrowLeft,
+  IconArrowUp,
+  IconHome,
   IconChartBar,
   IconCheck,
   IconCircle,
@@ -79,6 +81,8 @@ function centralIconWrapper(
 
 export const AlertTriangleIcon = adaptIcon(IconAlertTriangle);
 export const ArrowLeftIcon = adaptIcon(IconArrowLeft);
+export const ArrowUpIcon = adaptIcon(IconArrowUp);
+export const HomeIcon = adaptIcon(IconHome);
 export const BotIcon = adaptIcon(IconRobot);
 export const ChartBarIcon = adaptIcon(IconChartBar);
 export const CheckIcon = adaptIcon(IconCheck);

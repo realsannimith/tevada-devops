@@ -33,33 +33,35 @@ const PROVIDERS: Record<
     user: 'root',
     ipHint: 'Find the IP on your Droplet page (the "ipv4" address).',
     keyHint:
-      'DigitalOcean → Settings → Security → Add SSH Key. Add it there, then select it when creating (or rebuilding) your Droplet.',
+      'DigitalOcean uses root initially on most images. Add the public key under Settings → Security, then select it while creating the Droplet; adding it to your account later does not install it on an existing Droplet.',
   },
   aws: {
     label: 'AWS EC2',
-    user: 'ubuntu',
+    user: 'ec2-user',
     ipHint: 'EC2 → Instances → your instance → "Public IPv4 address".',
     keyHint:
-      'Add this key to the instance (EC2 Instance Connect, or paste into ~/.ssh/authorized_keys). Username is usually "ubuntu" or "ec2-user".',
+      'Use the private key pair assigned when this instance was launched. Login user depends on the AMI: "ec2-user" for Amazon Linux, "ubuntu" for Ubuntu, or "admin" for Debian.',
   },
   linode: {
     label: 'Linode / Akamai',
     user: 'root',
     ipHint: 'Linode dashboard → your Linode → "SSH Access" IP.',
-    keyHint: 'Linode → Profile → SSH Keys → Add a key, then deploy/rebuild.',
+    keyHint:
+      'Linode installs selected account SSH keys for root during creation. For an existing Linode, add the public key to /root/.ssh/authorized_keys.',
   },
   vultr: {
     label: 'Vultr',
     user: 'root',
     ipHint: 'Vultr → Products → your server → main IP.',
-    keyHint: 'Vultr → Account → SSH Keys → Add SSH Key, then attach on deploy.',
+    keyHint:
+      'Vultr commonly uses root; confirm the displayed username on the instance Overview page. Select the SSH key under Server Settings when deploying, or install it manually on an existing instance.',
   },
   hetzner: {
     label: 'Hetzner Cloud',
     user: 'root',
     ipHint: 'Hetzner Cloud console → your server → "IPv4".',
     keyHint:
-      'Hetzner Cloud → Security → SSH Keys → Add, then select it when creating the server.',
+      'Hetzner Cloud uses root initially. Add the public key under Security → SSH Keys and select it when creating the server; existing servers require manual installation.',
   },
   other: {
     label: 'Other / self-hosted',

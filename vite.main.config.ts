@@ -22,8 +22,9 @@ const BAKED_ENV_KEYS = [
 //
 // `ssh2` (and its optional native accelerator `cpu-features`) must stay external:
 // it uses dynamic requires and optional `.node` binaries that Rollup cannot bundle.
-// It remains in `dependencies`, so Electron Forge packages it into the app's pruned
-// node_modules; `plugin-auto-unpack-natives` unpacks any native optionals from the asar.
+// Packaged builds ship it via the RUNTIME_MODULES whitelist in forge.config.ts
+// (plugin-vite otherwise strips node_modules from the package entirely);
+// plugin-auto-unpack-natives unpacks the native optionals from the asar.
 export default defineConfig(({ mode }) => {
   const define: Record<string, string> = {};
   // Only bake for production packaging. In development (`bun run dev`) we leave

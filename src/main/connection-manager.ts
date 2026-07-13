@@ -10,14 +10,49 @@
  *  - On unexpected close we mark disconnected, tear down shells, and notify — we do
  *    NOT auto-reopen shells (their remote state is gone).
  */
-import { Client, type ClientChannel, type SFTPWrapper } from 'ssh2';
+import {
+  Client,
+  utils,
+  type ClientChannel,
+  type FileEntry,
+  type SFTPWrapper,
+} from 'ssh2';
 import {
   ConnStatus,
   ExecResult,
   ServerProfile,
   ServerSecret,
+  SftpEntry,
+  SftpEntryType,
 } from '../shared/ipc-types';
 import * as knownHosts from './knownHosts';
+
+/** POSIX mode field masks — used to classify SFTP directory entries by their
+ *  `mode` bits, which is more reliable across ssh2 versions than relying on the
+ *  attrs object carrying Stats helper methods. */
+const S_IFMT = 0o170000;
+const S_IFDIR = 0o040000;
+const S_IFLNK = 0o120000;
+const S_IFREG = 0o100000;
+
+function classifyMode(mode: number | undefined): SftpEntryType {
+  switch ((mode ?? 0) & S_IFMT) {
+    case S_IFDIR:
+      return 'directory';
+    case S_IFLNK:
+      return 'symlink';
+    case S_IFREG:
+      return 'file';
+    default:
+      return 'other';
+  }
+}
+
+/** Join a remote (POSIX) directory and a child name. Remote paths are always
+ *  '/'-separated regardless of the desktop OS, so we never use node's path. */
+export function posixJoin(dir: string, name: string): string {
+  return dir.endsWith('/') ? dir + name : `${dir}/${name}`;
+}
 
 type Managed = {
   client: Client;
@@ -47,6 +82,33 @@ type Listeners = {
 
 const DEFAULT_EXEC_TIMEOUT = 60_000;
 const DEFAULT_MAX_OUTPUT = 64 * 1024;
+
+/** Browser file reads preserve BOMs and sometimes old-Mac/Windows line endings.
+ * ssh2 accepts normal PEM/OpenSSH text, but those invisible bytes can make an
+ * otherwise valid uploaded key impossible to parse. */
+export function normalizePrivateKey(key: string): string {
+  return key.replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n').trim() + '\n';
+}
+
+export function actionableSshError(
+  message: string,
+  profile: Pick<ServerProfile, 'authType' | 'username'>,
+): string {
+  if (/all configured authentication methods failed/i.test(message)) {
+    if (profile.authType === 'key') {
+      return (
+        `The server is reachable, but it rejected this key for user ` +
+        `"${profile.username}". The upload worked. Confirm that this is the key ` +
+        `pair assigned to the instance and confirm the provider's login user ` +
+        `(AWS depends on the AMI; DigitalOcean, Linode, Vultr, and Hetzner ` +
+        `normally start with "root"). Also verify the matching public key is in that user's ` +
+        `~/.ssh/authorized_keys.`
+      );
+    }
+    return `The server is reachable, but it rejected the password for user "${profile.username}".`;
+  }
+  return message;
+}
 
 export class ConnectionManager {
   private conns = new Map<string, Managed>();
@@ -80,12 +142,20 @@ export class ConnectionManager {
     secret: ServerSecret,
     hostVerifier: (key: Buffer) => boolean,
   ) {
+    let privateKey: string | undefined;
+    if (profile.authType === 'key' && secret.privateKey) {
+      privateKey = normalizePrivateKey(secret.privateKey);
+      const parsed = utils.parseKey(privateKey, secret.passphrase || undefined);
+      if (parsed instanceof Error) {
+        throw new Error(`The uploaded private key could not be read: ${parsed.message}`);
+      }
+    }
     return {
       host: profile.host,
       port: profile.port,
       username: profile.username,
       password: profile.authType === 'password' ? secret.password : undefined,
-      privateKey: profile.authType === 'key' ? secret.privateKey : undefined,
+      privateKey,
       passphrase: secret.passphrase || undefined,
       hostVerifier,
       keepaliveInterval: 10_000,
@@ -149,16 +219,22 @@ export class ConnectionManager {
         .on('error', (err) =>
           done(
             false,
-            mismatch.hit ? this.hostKeyChangedMessage(profile) : err.message,
+            mismatch.hit
+              ? this.hostKeyChangedMessage(profile)
+              : actionableSshError(err.message, profile),
           ),
-        )
-        .connect(
+        );
+      try {
+        client.connect(
           this.buildConfig(
             profile,
             secret,
             this.makeHostVerifier(profile, mismatch),
           ),
         );
+      } catch (err) {
+        done(false, err instanceof Error ? err.message : String(err));
+      }
     });
   }
 
@@ -195,7 +271,7 @@ export class ConnectionManager {
         .on('error', (err) => {
           const message = mismatch.hit
             ? this.hostKeyChangedMessage(profile)
-            : err.message;
+            : actionableSshError(err.message, profile);
           this.setStatus(profile.id, 'error', message);
           if (!settled) {
             settled = true;
@@ -217,14 +293,22 @@ export class ConnectionManager {
           if (managed.status !== 'error') {
             this.setStatus(profile.id, 'disconnected');
           }
-        })
-        .connect(
+        });
+
+      try {
+        client.connect(
           this.buildConfig(
             profile,
             secret,
             this.makeHostVerifier(profile, mismatch),
           ),
         );
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        this.setStatus(profile.id, 'error', message);
+        settled = true;
+        resolve({ ok: false, error: message });
+      }
 
       // Interactive typing dies by Nagle's algorithm: without TCP_NODELAY each
       // keystroke packet can sit in the send buffer waiting on the previous
@@ -526,6 +610,135 @@ export class ConnectionManager {
       stream.on('error', reject);
       stream.on('close', () => resolve());
       stream.end(content);
+    });
+  }
+
+  // --- SFTP file browser (user-facing Files tab) ---------------------------
+
+  /** Resolve a path to its absolute form on the server ('.' → the login home). */
+  async sftpRealpath(serverId: string, remotePath: string): Promise<string> {
+    const m = this.requireConnected(serverId);
+    const sftp = await this.getSftp(m);
+    return new Promise((resolve, reject) => {
+      sftp.realpath(remotePath && remotePath.length ? remotePath : '.', (err, abs) =>
+        err ? reject(err) : resolve(abs),
+      );
+    });
+  }
+
+  /** List a remote directory. Resolves the path first so breadcrumbs and the
+   *  home button always show a canonical absolute path (no trailing '.'/'..'). */
+  async sftpList(
+    serverId: string,
+    remotePath: string,
+  ): Promise<{ path: string; entries: SftpEntry[] }> {
+    const m = this.requireConnected(serverId);
+    const sftp = await this.getSftp(m);
+    const abs = await this.sftpRealpath(serverId, remotePath);
+    const list = await new Promise<FileEntry[]>((resolve, reject) => {
+      sftp.readdir(abs, (err, l) => (err ? reject(err) : resolve(l)));
+    });
+    const entries: SftpEntry[] = list
+      .filter((e) => e.filename !== '.' && e.filename !== '..')
+      .map((e) => {
+        const mode = e.attrs?.mode ?? 0;
+        return {
+          name: e.filename,
+          path: posixJoin(abs, e.filename),
+          type: classifyMode(mode),
+          size: e.attrs?.size ?? 0,
+          // ssh2 reports mtime in whole seconds; the UI wants ms since epoch.
+          mtime: (e.attrs?.mtime ?? 0) * 1000,
+          mode,
+        };
+      });
+    return { path: abs, entries };
+  }
+
+  async sftpMkdir(serverId: string, remotePath: string): Promise<void> {
+    const m = this.requireConnected(serverId);
+    const sftp = await this.getSftp(m);
+    return new Promise((resolve, reject) => {
+      sftp.mkdir(remotePath, (err) => (err ? reject(err) : resolve()));
+    });
+  }
+
+  async sftpRename(serverId: string, from: string, to: string): Promise<void> {
+    const m = this.requireConnected(serverId);
+    const sftp = await this.getSftp(m);
+    return new Promise((resolve, reject) => {
+      sftp.rename(from, to, (err) => (err ? reject(err) : resolve()));
+    });
+  }
+
+  /** Delete a file, or a directory and everything under it. Recursion runs
+   *  entirely over SFTP (unlink/rmdir) — no shell — so it stays within the same
+   *  trust boundary as the rest of the file browser and never follows symlinks
+   *  (a symlinked entry is unlinked, not descended into). */
+  async sftpDelete(
+    serverId: string,
+    remotePath: string,
+    isDir: boolean,
+  ): Promise<void> {
+    const m = this.requireConnected(serverId);
+    const sftp = await this.getSftp(m);
+    await this.sftpRemovePath(sftp, remotePath, isDir);
+  }
+
+  private async sftpRemovePath(
+    sftp: SFTPWrapper,
+    remotePath: string,
+    isDir: boolean,
+  ): Promise<void> {
+    if (!isDir) {
+      return new Promise((resolve, reject) =>
+        sftp.unlink(remotePath, (err) => (err ? reject(err) : resolve())),
+      );
+    }
+    const children = await new Promise<FileEntry[]>((resolve, reject) => {
+      sftp.readdir(remotePath, (err, l) => (err ? reject(err) : resolve(l)));
+    });
+    for (const child of children) {
+      if (child.filename === '.' || child.filename === '..') continue;
+      const childIsDir = ((child.attrs?.mode ?? 0) & S_IFMT) === S_IFDIR;
+      await this.sftpRemovePath(
+        sftp,
+        posixJoin(remotePath, child.filename),
+        childIsDir,
+      );
+    }
+    return new Promise((resolve, reject) =>
+      sftp.rmdir(remotePath, (err) => (err ? reject(err) : resolve())),
+    );
+  }
+
+  /** Stream a remote file down to a local path (binary-safe). */
+  async sftpFastGet(
+    serverId: string,
+    remotePath: string,
+    localPath: string,
+  ): Promise<void> {
+    const m = this.requireConnected(serverId);
+    const sftp = await this.getSftp(m);
+    return new Promise((resolve, reject) => {
+      sftp.fastGet(remotePath, localPath, (err) =>
+        err ? reject(err) : resolve(),
+      );
+    });
+  }
+
+  /** Stream a local file up to a remote path (binary-safe). */
+  async sftpFastPut(
+    serverId: string,
+    localPath: string,
+    remotePath: string,
+  ): Promise<void> {
+    const m = this.requireConnected(serverId);
+    const sftp = await this.getSftp(m);
+    return new Promise((resolve, reject) => {
+      sftp.fastPut(localPath, remotePath, (err) =>
+        err ? reject(err) : resolve(),
+      );
     });
   }
 }

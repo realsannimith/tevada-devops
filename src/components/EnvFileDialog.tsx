@@ -272,9 +272,9 @@ function EnvEditor({
                   }
                 />
                 <Button
-                  variant="ghost"
+                  variant="destructive"
                   size="sm"
-                  className="size-9 shrink-0 p-0 text-muted-foreground/70 hover:text-destructive"
+                  className="size-9 shrink-0 p-0"
                   aria-label={`Remove ${row.key || 'variable'}`}
                   onClick={() => setDraft(draft.filter((r) => r.id !== row.id))}
                 >

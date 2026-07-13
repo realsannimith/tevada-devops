@@ -10,6 +10,7 @@ import {
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
 import { Button } from '@/components/ui/button';
+import agentIcon from '@/assets/agent-icon.png';
 import {
   Select,
   SelectContent,
@@ -18,7 +19,6 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { AgentFeed } from '@/components/AgentFeed';
-import { SidebarGlyph } from '@/components/sidebarGlyphs';
 import {
   COMPOSER_COLUMN_FRAME_CLASS_NAME,
   COMPOSER_EDITOR_CLASS_NAME,
@@ -34,11 +34,14 @@ import {
   CHAT_HISTORY_UPDATED_EVENT,
   CHAT_NEW_SESSION_EVENT,
   CHAT_PREFILL_EVENT,
+  CHAT_PROJECT_CHANGED_EVENT,
   CHAT_SESSION_SWITCH_EVENT,
   markInterruptedToolsDone,
   newChatSessionId,
   sessionKind,
+  type ChatNewSessionDetail,
   type ChatPrefillDetail,
+  type ChatProjectChangedDetail,
 } from '@/lib/chatHistory';
 import { chatRunManager, useChatRun } from '@/lib/chatRunManager';
 import { buildAgentMessages } from '@/lib/chatMessages';
@@ -63,7 +66,6 @@ import {
   PaperclipIcon,
   PlusIcon,
   ServerIcon,
-  SparklesIcon,
   TrashIcon,
   XIcon,
 } from '@/lib/icons';
@@ -228,13 +230,31 @@ export function ChatPanel() {
     return () => window.removeEventListener(CHAT_SESSION_SWITCH_EVENT, handleSwitch);
   }, []);
 
-  // The sidebar's "New chat" button — same behavior as the header button.
+  // The sidebar's "New chat" button — same behavior as the header button. A
+  // project folder's "+" passes its project id so the draft starts pre-scoped.
   useEffect(() => {
-    const handleNewChat = () => {
+    const handleNewChat = (event: Event) => {
+      const detail = (event as CustomEvent<ChatNewSessionDetail | undefined>)
+        .detail;
       newChat();
+      if (detail?.projectId) setProject(detail.projectId);
     };
     window.addEventListener(CHAT_NEW_SESSION_EVENT, handleNewChat);
     return () => window.removeEventListener(CHAT_NEW_SESSION_EVENT, handleNewChat);
+  }, []);
+
+  // The sidebar moved a chat between projects. If it's the one on screen,
+  // update the picker — otherwise this panel's next debounced save would write
+  // the old projectId back and undo the move.
+  useEffect(() => {
+    const handleProjectChanged = (event: Event) => {
+      const detail = (event as CustomEvent<ChatProjectChangedDetail>).detail;
+      if (!detail || detail.id !== sessionIdRef.current) return;
+      setProject(detail.projectId ?? NO_PROJECT);
+    };
+    window.addEventListener(CHAT_PROJECT_CHANGED_EVENT, handleProjectChanged);
+    return () =>
+      window.removeEventListener(CHAT_PROJECT_CHANGED_EVENT, handleProjectChanged);
   }, []);
 
   // Other screens draft a message into the composer (e.g. Artifacts' "Review
@@ -493,27 +513,25 @@ export function ChatPanel() {
         />
       )}
       <div className="mb-2 flex items-center gap-2">
-        <Select value={project} onValueChange={setProject}>
-          <SelectTrigger
-            size="sm"
-            className={COMPOSER_FOOTER_PICKER_TRIGGER_CLASS_NAME}
-            aria-label="Choose project"
-          >
-            <FolderIcon
-              aria-hidden
-              className="size-3.5 shrink-0 text-foreground"
-            />
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent side="top">
-            <SelectItem value={NO_PROJECT}>No project</SelectItem>
-            {projects.map((p) => (
-              <SelectItem key={p.id} value={p.id}>
-                {p.name}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
+        {/* The chat's scope is fixed by where it was started (a project folder
+            or the global New chat) — shown as a plain label, never a picker.
+            Filing a chat elsewhere stays a sidebar action ("Move to project"). */}
+        <span
+          className="flex h-7 shrink-0 items-center gap-1.5 rounded-lg border border-border px-2 text-[11px] font-normal text-foreground"
+          title={
+            project === NO_PROJECT
+              ? 'This chat spans all projects'
+              : 'This chat is scoped to its project'
+          }
+        >
+          <FolderIcon
+            aria-hidden
+            className="size-3.5 shrink-0 text-foreground"
+          />
+          {project === NO_PROJECT
+            ? 'All projects'
+            : (projects.find((p) => p.id === project)?.name ?? 'Project')}
+        </span>
         <Select value={target} onValueChange={setTarget}>
           <SelectTrigger
             size="sm"
@@ -662,9 +680,11 @@ export function ChatPanel() {
     <div className="flex h-full flex-col bg-background">
       <header className="chat-surface-divider flex shrink-0 items-center justify-between px-5 py-3">
         <div className="flex items-center gap-2.5">
-          <span className="skill-chip flex size-6 items-center justify-center rounded-full">
-            <SidebarGlyph icon={SparklesIcon} variant="chrome" />
-          </span>
+          <img
+            src={agentIcon}
+            alt=""
+            className="size-6 shrink-0 rounded-[7px]"
+          />
           <div>
             <h1 className="text-sm font-semibold tracking-[-0.015em] text-ink">
               DevOps Agent
@@ -686,7 +706,7 @@ export function ChatPanel() {
           </Button>
           <Button
             type="button"
-            variant="ghost"
+            variant="destructive"
             size="icon-sm"
             onClick={() => setConfirmDelete(true)}
             disabled={running || feed.length === 0}
@@ -723,9 +743,11 @@ export function ChatPanel() {
 
       {isEmptyConversation ? (
         <div className="flex flex-1 flex-col items-center justify-center px-4 pb-24">
-          <span className="skill-chip mb-4 flex size-10 items-center justify-center rounded-full">
-            <SidebarGlyph icon={SparklesIcon} variant="chrome" />
-          </span>
+          <img
+            src={agentIcon}
+            alt=""
+            className="mb-4 size-10 rounded-xl"
+          />
           <h2 className="mb-1 text-sm font-semibold tracking-[-0.015em] text-ink">
             What can I help you with?
           </h2>
@@ -820,9 +842,9 @@ function ComposerQueuedHeader({
               </Button>
               <Button
                 type="button"
-                variant="ghost"
+                variant="destructive"
                 size="icon-sm"
-                className="size-6 text-muted-foreground/70"
+                className="size-6"
                 onClick={() => onRemove(turn.id)}
                 aria-label="Remove queued message"
                 title="Remove"
@@ -871,12 +893,10 @@ function AttachmentChip({
         type="button"
         onClick={onRemove}
         aria-label={`Remove ${attachment.name}`}
-        className="ml-0.5 rounded-full p-0.5 text-muted-foreground/60 transition-colors hover:bg-accent hover:text-foreground"
+        className="ml-0.5 rounded-full bg-destructive p-0.5 text-white transition-colors hover:bg-destructive/90"
       >
         <XIcon aria-hidden className="size-3.5" />
       </button>
     </div>
   );
 }
-
-

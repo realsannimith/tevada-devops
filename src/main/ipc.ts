@@ -2,12 +2,14 @@
  * Registers every ipcMain handler and wires the store, secrets, connection
  * manager, monitor and agent together. Called once after app.whenReady().
  */
-import { BrowserWindow, ipcMain } from 'electron';
+import { BrowserWindow, dialog, ipcMain } from 'electron';
+import { basename } from 'node:path';
 import {
   AgentEvent,
   AgentStartRequest,
   AlertConfig,
   AppSettings,
+  McpInstallClient,
   ArtifactActionRequest,
   ArtifactLogsRequest,
   ChatSession,
@@ -28,7 +30,7 @@ import * as googleDriveSync from './googleDriveSync';
 import * as alerts from './alerts';
 import { AlertEngine } from './alerts';
 import * as deployments from './deployments';
-import { ConnectionManager } from './connection-manager';
+import { ConnectionManager, posixJoin } from './connection-manager';
 import * as knownHosts from './knownHosts';
 import { Monitor } from './monitor';
 import {
@@ -38,6 +40,7 @@ import {
 } from './artifacts';
 import {
   buildProjectContext,
+  buildWorkspaceContext,
   cancelAgentRun,
   cancelAllRuns,
   startAgentRun,
@@ -45,6 +48,8 @@ import {
 } from '../agent/agent';
 import * as aiKeys from './aiKeys';
 import * as codexAuth from './codexAuth';
+import { TevadaMcpServer } from './mcpServer';
+import { installMcpClient } from './mcpInstall';
 import { isProviderId, ProviderId } from '../shared/providers';
 import { AgentToolContext } from '../agent/tools';
 import { buildModelMessages } from '../agent/attachments';
@@ -318,6 +323,151 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
     },
   );
 
+  // --- sftp file browser (Files tab) ---------------------------------------
+  // Surfaces the same lazily-opened SFTP session the agent uses. Uploads and
+  // downloads pick the local path through the OS-native dialog (main-only), so
+  // the renderer never touches the filesystem directly. All remote paths are
+  // POSIX regardless of the desktop platform.
+
+  const errMsg = (e: unknown) => (e instanceof Error ? e.message : String(e));
+
+  ipcMain.handle(IPC.sftpHome, async (_e, arg: { serverId: string }) => {
+    try {
+      return { ok: true as const, path: await cm.sftpRealpath(arg.serverId, '.') };
+    } catch (e) {
+      return { ok: false as const, error: errMsg(e) };
+    }
+  });
+
+  ipcMain.handle(
+    IPC.sftpList,
+    async (_e, arg: { serverId: string; path: string }) => {
+      try {
+        const { path, entries } = await cm.sftpList(arg.serverId, arg.path);
+        return { ok: true as const, path, entries };
+      } catch (e) {
+        return { ok: false as const, error: errMsg(e) };
+      }
+    },
+  );
+
+  ipcMain.handle(
+    IPC.sftpMkdir,
+    async (_e, arg: { serverId: string; path: string }) => {
+      try {
+        await cm.sftpMkdir(arg.serverId, arg.path);
+        return { ok: true as const };
+      } catch (e) {
+        return { ok: false as const, error: errMsg(e) };
+      }
+    },
+  );
+
+  ipcMain.handle(
+    IPC.sftpRename,
+    async (_e, arg: { serverId: string; from: string; to: string }) => {
+      try {
+        await cm.sftpRename(arg.serverId, arg.from, arg.to);
+        return { ok: true as const };
+      } catch (e) {
+        return { ok: false as const, error: errMsg(e) };
+      }
+    },
+  );
+
+  ipcMain.handle(
+    IPC.sftpDelete,
+    async (_e, arg: { serverId: string; path: string; isDir: boolean }) => {
+      try {
+        await cm.sftpDelete(arg.serverId, arg.path, arg.isDir);
+        return { ok: true as const };
+      } catch (e) {
+        return { ok: false as const, error: errMsg(e) };
+      }
+    },
+  );
+
+  // Read cap for the built-in text editor. Files above this are opened
+  // truncated (read-only in the UI) so we never pull a huge/binary blob into
+  // the renderer.
+  const SFTP_EDIT_MAX_BYTES = 512 * 1024;
+
+  ipcMain.handle(
+    IPC.sftpRead,
+    async (_e, arg: { serverId: string; path: string }) => {
+      try {
+        const res = await cm.sftpReadFile(arg.serverId, arg.path, SFTP_EDIT_MAX_BYTES);
+        return { ok: true as const, ...res };
+      } catch (e) {
+        return { ok: false as const, error: errMsg(e) };
+      }
+    },
+  );
+
+  ipcMain.handle(
+    IPC.sftpWrite,
+    async (_e, arg: { serverId: string; path: string; content: string }) => {
+      try {
+        await cm.sftpWriteFile(arg.serverId, arg.path, arg.content);
+        return { ok: true as const };
+      } catch (e) {
+        return { ok: false as const, error: errMsg(e) };
+      }
+    },
+  );
+
+  ipcMain.handle(
+    IPC.sftpDownload,
+    async (_e, arg: { serverId: string; path: string; name: string }) => {
+      const win = getWindow();
+      const opts = { defaultPath: arg.name };
+      const res = win
+        ? await dialog.showSaveDialog(win, opts)
+        : await dialog.showSaveDialog(opts);
+      if (res.canceled || !res.filePath) {
+        return { ok: true as const, canceled: true, count: 0 };
+      }
+      try {
+        await cm.sftpFastGet(arg.serverId, arg.path, res.filePath);
+        return { ok: true as const, count: 1 };
+      } catch (e) {
+        return { ok: false as const, error: errMsg(e) };
+      }
+    },
+  );
+
+  ipcMain.handle(
+    IPC.sftpUpload,
+    async (_e, arg: { serverId: string; dir: string }) => {
+      const win = getWindow();
+      const opts = {
+        properties: ['openFile', 'multiSelections'] as Array<
+          'openFile' | 'multiSelections'
+        >,
+      };
+      const res = win
+        ? await dialog.showOpenDialog(win, opts)
+        : await dialog.showOpenDialog(opts);
+      if (res.canceled || res.filePaths.length === 0) {
+        return { ok: true as const, canceled: true, count: 0 };
+      }
+      try {
+        let count = 0;
+        for (const local of res.filePaths) {
+          await cm.sftpFastPut(
+            arg.serverId,
+            local,
+            posixJoin(arg.dir, basename(local)),
+          );
+          count++;
+        }
+        return { ok: true as const, count };
+      } catch (e) {
+        return { ok: false as const, error: errMsg(e) };
+      }
+    },
+  );
+
   // --- monitor -------------------------------------------------------------
 
   ipcMain.handle(IPC.monitorStart, (_e, arg: { serverId: string }) => {
@@ -411,7 +561,23 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
             .filter((s) => allowedServerIds!.has(s.id))
             .map((s) => s.name),
         })
-      : undefined;
+      : buildWorkspaceContext({
+          projects: store.listProjects().map((p) => {
+            const memberIds = new Set(store.listServerIdsForProject(p.id));
+            return {
+              name: p.name,
+              memory: p.memory,
+              serverNames: store
+                .listServers()
+                .filter((s) => memberIds.has(s.id))
+                .map((s) => s.name),
+            };
+          }),
+          unassignedServerNames: store
+            .listServers()
+            .filter((s) => !s.projectIds || s.projectIds.length === 0)
+            .map((s) => s.name),
+        });
 
     const toolContext: AgentToolContext = {
       cm,
@@ -676,6 +842,14 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
     send(IPC.evtChatHistory, saved);
     return saved;
   });
+  ipcMain.handle(
+    IPC.chatHistorySetProject,
+    (_e, id: string, projectId: string | null) => {
+      const saved = store.setChatSessionProject(id, projectId);
+      send(IPC.evtChatHistory, saved);
+      return saved;
+    },
+  );
   ipcMain.handle(IPC.chatHistoryDelete, (_e, id: string) => {
     const saved = store.deleteChatSession(id);
     send(IPC.evtChatHistory, saved);
@@ -920,6 +1094,53 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
     return alerts.getAlertsStatus();
   });
 
+  // --- local MCP server ------------------------------------------------------
+  // External coding agents (Claude Code, Codex, …) reach the user's servers
+  // through this app: the endpoint reuses the same store + connection manager
+  // the in-app agent uses, and credentials never leave the main process.
+
+  const mcp = new TevadaMcpServer(
+    {
+      listServers: () => store.listServers(),
+      listProjects: () => store.listProjects(),
+      getStatus: (serverId) => cm.getStatus(serverId),
+      connect: connectServer,
+      exec: (serverId, command, opts) => cm.exec(serverId, command, opts),
+      getStats: (serverId) => monitor.getLatest(serverId),
+    },
+    (status) => send(IPC.evtMcpStatus, status),
+  );
+
+  ipcMain.handle(IPC.mcpStatus, () => mcp.status());
+  ipcMain.handle(IPC.mcpStart, async (_e, arg: { port?: number }) => {
+    const port =
+      arg?.port && Number.isInteger(arg.port) && arg.port > 0 && arg.port < 65536
+        ? arg.port
+        : store.getSettings().mcpPort;
+    const status = await mcp.start(port);
+    // Persist intent only when the server actually came up, so a bad port
+    // doesn't get remembered as "auto-start this".
+    store.setSettings({ mcpEnabled: status.running, mcpPort: port });
+    return status;
+  });
+  ipcMain.handle(IPC.mcpStop, async () => {
+    store.setSettings({ mcpEnabled: false });
+    return mcp.stop();
+  });
+  ipcMain.handle(
+    IPC.mcpInstall,
+    (_e, arg: { client: McpInstallClient }) => {
+      const { url } = mcp.status();
+      const target = url ?? `http://127.0.0.1:${store.getSettings().mcpPort}/mcp`;
+      return installMcpClient(arg.client, target);
+    },
+  );
+
+  // Auto-start if the user left it enabled last session.
+  if (store.getSettings().mcpEnabled) {
+    void mcp.start(store.getSettings().mcpPort);
+  }
+
   // --- lifecycle cleanup ---------------------------------------------------
 
   const win = getWindow();
@@ -941,6 +1162,7 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
       stopGoogleDriveAutoSync();
       stopGoogleDriveStatus();
       alertEngine.stop();
+      void mcp.stop();
     });
   }
 }

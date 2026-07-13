@@ -11,7 +11,7 @@ const buttonVariants = cva(
   {
     variants: {
       variant: {
-        default: "bg-primary text-primary-foreground hover:bg-primary/90",
+        default: "border-border bg-white text-black hover:bg-white/90",
         outline:
           "border-border bg-transparent text-foreground hover:bg-accent aria-expanded:bg-accent",
         secondary:
@@ -23,7 +23,7 @@ const buttonVariants = cva(
         skill:
           "bg-[color-mix(in_srgb,var(--skill)_14%,transparent)] text-skill hover:bg-[color-mix(in_srgb,var(--skill)_22%,transparent)]",
         prominent:
-          "rounded-full bg-ink text-background hover:scale-[1.03] transition-transform",
+          "rounded-full border-border bg-white text-black hover:scale-[1.03] hover:bg-white/90 transition-transform",
         link: "text-primary underline-offset-4 hover:underline",
       },
       size: {

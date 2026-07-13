@@ -338,6 +338,50 @@ export function buildProjectContext(input: {
 }
 
 /**
+ * Compose the workspace overview preamble for a chat with NO project tag: the
+ * global "New chat" spans every project, so the agent gets the full picture —
+ * each project, its servers, and its memory — and can answer cross-project
+ * questions ("how many projects do I have?") without guessing. Same
+ * caller-supplies-strings contract as {@link buildProjectContext}.
+ */
+export function buildWorkspaceContext(input: {
+  projects: { name: string; serverNames: string[]; memory?: string }[];
+  unassignedServerNames: string[];
+}): string {
+  const lines = [
+    '',
+    '',
+    'This chat is not scoped to a single project — you can see and operate across the whole workspace.',
+  ];
+  if (input.projects.length === 0) {
+    lines.push('The user has no projects yet.');
+  } else {
+    lines.push(
+      `The user has ${input.projects.length} project${input.projects.length === 1 ? '' : 's'}:`,
+    );
+    for (const p of input.projects) {
+      lines.push(
+        `- "${p.name}"${
+          p.serverNames.length > 0
+            ? ` — servers: ${p.serverNames.join(', ')}`
+            : ' — no servers yet'
+        }`,
+      );
+      const memory = p.memory?.trim();
+      if (memory) {
+        lines.push(`  Project memory: ${memory.replace(/\s*\n\s*/g, ' ')}`);
+      }
+    }
+  }
+  if (input.unassignedServerNames.length > 0) {
+    lines.push(
+      `Servers not in any project: ${input.unassignedServerNames.join(', ')}.`,
+    );
+  }
+  return lines.join('\n');
+}
+
+/**
  * Start a streaming agent run. Returns immediately; progress arrives via emit.
  */
 export function startAgentRun(opts: StartAgentRunOptions): void {

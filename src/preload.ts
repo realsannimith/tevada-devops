@@ -41,6 +41,9 @@ import {
   GithubReposResult,
   GithubStatus,
   IPC,
+  McpInstallClient,
+  McpInstallResult,
+  McpStatus,
   MonitorStatsEvent,
   PlaybookMeta,
   Project,
@@ -49,6 +52,10 @@ import {
   ServerProfile,
   ServerSecret,
   ServerWithStatus,
+  SftpListResult,
+  SftpPathResult,
+  SftpReadResult,
+  SftpTransferResult,
   SshStatusEvent,
   SteerItem,
   TelegramChatDetectResult,
@@ -149,6 +156,31 @@ const easyhost = {
       on<TermExitEvent>(IPC.evtTermExit, cb),
   },
 
+  sftp: {
+    home: (serverId: string): Promise<SftpPathResult> =>
+      ipcRenderer.invoke(IPC.sftpHome, { serverId }),
+    list: (serverId: string, path: string): Promise<SftpListResult> =>
+      ipcRenderer.invoke(IPC.sftpList, { serverId, path }),
+    mkdir: (serverId: string, path: string): Promise<OkResult> =>
+      ipcRenderer.invoke(IPC.sftpMkdir, { serverId, path }),
+    rename: (serverId: string, from: string, to: string): Promise<OkResult> =>
+      ipcRenderer.invoke(IPC.sftpRename, { serverId, from, to }),
+    remove: (serverId: string, path: string, isDir: boolean): Promise<OkResult> =>
+      ipcRenderer.invoke(IPC.sftpDelete, { serverId, path, isDir }),
+    read: (serverId: string, path: string): Promise<SftpReadResult> =>
+      ipcRenderer.invoke(IPC.sftpRead, { serverId, path }),
+    write: (serverId: string, path: string, content: string): Promise<OkResult> =>
+      ipcRenderer.invoke(IPC.sftpWrite, { serverId, path, content }),
+    download: (
+      serverId: string,
+      path: string,
+      name: string,
+    ): Promise<SftpTransferResult> =>
+      ipcRenderer.invoke(IPC.sftpDownload, { serverId, path, name }),
+    upload: (serverId: string, dir: string): Promise<SftpTransferResult> =>
+      ipcRenderer.invoke(IPC.sftpUpload, { serverId, dir }),
+  },
+
   monitor: {
     start: (serverId: string): Promise<{ ok: boolean }> =>
       ipcRenderer.invoke(IPC.monitorStart, { serverId }),
@@ -190,6 +222,8 @@ const easyhost = {
       ipcRenderer.invoke(IPC.chatHistorySetPinned, id, pinned),
     rename: (id: string, title: string): Promise<ChatHistoryState> =>
       ipcRenderer.invoke(IPC.chatHistoryRename, id, title),
+    setProject: (id: string, projectId: string | null): Promise<ChatHistoryState> =>
+      ipcRenderer.invoke(IPC.chatHistorySetProject, id, projectId),
     delete: (id: string): Promise<ChatHistoryState> =>
       ipcRenderer.invoke(IPC.chatHistoryDelete, id),
     onChanged: (cb: (state: ChatHistoryChangedEvent) => void) =>
@@ -340,6 +374,17 @@ const easyhost = {
       ipcRenderer.invoke(IPC.alertsSetServer, config),
     onEvent: (cb: (e: AlertEvent) => void) =>
       on<AlertEvent>(IPC.evtAlert, cb),
+  },
+
+  mcp: {
+    status: (): Promise<McpStatus> => ipcRenderer.invoke(IPC.mcpStatus),
+    start: (port?: number): Promise<McpStatus> =>
+      ipcRenderer.invoke(IPC.mcpStart, { port }),
+    stop: (): Promise<McpStatus> => ipcRenderer.invoke(IPC.mcpStop),
+    install: (client: McpInstallClient): Promise<McpInstallResult> =>
+      ipcRenderer.invoke(IPC.mcpInstall, { client }),
+    onStatus: (cb: (s: McpStatus) => void) =>
+      on<McpStatus>(IPC.evtMcpStatus, cb),
   },
 };
 

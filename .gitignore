@@ -102,3 +102,7 @@ dist/
 
 # Patched Electron dev bundle (name fix) — generated, do not commit
 .electron-runtime/
+
+# Python bytecode cache (build scripts)
+__pycache__/
+*.pyc

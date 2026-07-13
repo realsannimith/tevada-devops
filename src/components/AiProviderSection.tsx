@@ -300,7 +300,7 @@ function ProviderKeyEditor({
           </Button>
           {stored && (
             <Button
-              variant="ghost"
+              variant="destructive"
               size="sm"
               className="shrink-0"
               onClick={() => setConfirmRemove(true)}

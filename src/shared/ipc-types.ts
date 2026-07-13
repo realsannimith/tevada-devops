@@ -89,6 +89,10 @@ export type AppSettings = {
   aiEffort: EffortLevel;
   /** Extended thinking / reasoning on or off (where the provider supports it). */
   aiThinking: boolean;
+  /** Auto-start the local MCP server on launch so external agents can connect. */
+  mcpEnabled: boolean;
+  /** Localhost port the MCP server listens on. */
+  mcpPort: number;
 };
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -101,6 +105,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
   aiBaseUrl: '',
   aiEffort: 'medium',
   aiThinking: true,
+  mcpEnabled: false,
+  mcpPort: 7423,
 };
 
 /**
@@ -276,6 +282,52 @@ export type ExecResult = {
   truncated: boolean;
   timedOut: boolean;
 };
+
+// ---------------------------------------------------------------------------
+// SFTP file browser (the Files tab). All paths are remote POSIX paths. The
+// backend is the same lazily-opened SFTP session the agent uses (see
+// connection-manager.ts); these operations just surface it to the user.
+// ---------------------------------------------------------------------------
+
+export type SftpEntryType = 'file' | 'directory' | 'symlink' | 'other';
+
+/** One entry in a remote directory listing. */
+export type SftpEntry = {
+  name: string;
+  /** Absolute remote path (parent dir + name). */
+  path: string;
+  type: SftpEntryType;
+  /** Size in bytes (0 for directories). */
+  size: number;
+  /** Last-modified time, ms since epoch. */
+  mtime: number;
+  /** POSIX permission/type bits, e.g. 0o100644. */
+  mode: number;
+};
+
+export type SftpListResult =
+  | { ok: true; path: string; entries: SftpEntry[] }
+  | { ok: false; error: string };
+
+/** Realpath of a remote path (e.g. the login home for '.'). */
+export type SftpPathResult =
+  | { ok: true; path: string }
+  | { ok: false; error: string };
+
+/** Text contents of a remote file, for the built-in editor. `truncated` is set
+ *  when the file was larger than the read cap and only a prefix was returned. */
+export type SftpReadResult =
+  | { ok: true; content: string; truncated: boolean }
+  | { ok: false; error: string };
+
+/**
+ * A local file transfer (upload/download). `canceled` is true when the user
+ * dismissed the native file/save dialog — a no-op, not an error. `count` is how
+ * many files moved (downloads are always 1; uploads may be several).
+ */
+export type SftpTransferResult =
+  | { ok: true; canceled?: boolean; count: number }
+  | { ok: false; error: string };
 
 // ---------------------------------------------------------------------------
 // Agent streaming events (main -> renderer, wrapped as { runId, event })
@@ -906,6 +958,16 @@ export const IPC = {
   termClose: 'term:close',
   termResize: 'term:resize',
   termInput: 'term:input',
+  // sftp file browser (invoke) — the Files tab
+  sftpHome: 'sftp:home',
+  sftpList: 'sftp:list',
+  sftpMkdir: 'sftp:mkdir',
+  sftpRename: 'sftp:rename',
+  sftpDelete: 'sftp:delete',
+  sftpRead: 'sftp:read',
+  sftpWrite: 'sftp:write',
+  sftpDownload: 'sftp:download',
+  sftpUpload: 'sftp:upload',
   // monitor (invoke)
   monitorStart: 'monitor:start',
   monitorStop: 'monitor:stop',
@@ -922,6 +984,7 @@ export const IPC = {
   chatHistorySetActive: 'chat-history:set-active',
   chatHistorySetPinned: 'chat-history:set-pinned',
   chatHistoryRename: 'chat-history:rename',
+  chatHistorySetProject: 'chat-history:set-project',
   chatHistoryDelete: 'chat-history:delete',
   // settings (invoke)
   settingsGet: 'settings:get',
@@ -983,6 +1046,12 @@ export const IPC = {
   alertsTest: 'alerts:test',
   alertsSetConfig: 'alerts:set-config',
   alertsSetServer: 'alerts:set-server',
+  // local MCP server (invoke) — lets external coding agents (Claude Code,
+  // Codex, …) operate on the user's servers through this app
+  mcpStatus: 'mcp:status',
+  mcpStart: 'mcp:start',
+  mcpStop: 'mcp:stop',
+  mcpInstall: 'mcp:install',
 
   // events (main -> renderer)
   evtSshStatus: 'ssh:status',
@@ -996,7 +1065,29 @@ export const IPC = {
   evtCodexAuth: 'codex:auth-event',
   evtChatHistory: 'chat-history:changed',
   evtAlert: 'alerts:event',
+  evtMcpStatus: 'mcp:status-changed',
 } as const;
+
+// ---------------------------------------------------------------------------
+// Local MCP server (agent access)
+// ---------------------------------------------------------------------------
+
+/** Live state of the in-app MCP server, for the Settings UI. */
+export type McpStatus = {
+  running: boolean;
+  port: number;
+  /** Full endpoint URL while running (e.g. http://127.0.0.1:7423/mcp). */
+  url: string | null;
+  /** Last start error, if the server failed to come up (e.g. port in use). */
+  error?: string;
+};
+
+/** Agents we can wire up with one click by editing their local config. */
+export type McpInstallClient = 'claude-code' | 'codex';
+
+export type McpInstallResult =
+  | { ok: true; detail: string }
+  | { ok: false; error: string };
 
 // ---------------------------------------------------------------------------
 // Event payloads

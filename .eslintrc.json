@@ -14,6 +14,10 @@
   ],
   "parser": "@typescript-eslint/parser",
   "rules": {
+    "import/no-unresolved": [
+      "error",
+      { "ignore": ["^@modelcontextprotocol/sdk/"] }
+    ],
     "@typescript-eslint/no-unused-vars": [
       "error",
       {

@@ -218,7 +218,7 @@ function ServerDashboardCard({
             <button
               onClick={onConnect}
               disabled={status === 'connecting'}
-              className="rounded-md bg-primary px-2.5 py-1 text-[11px] font-medium text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-50"
+              className="rounded-md border border-border bg-white px-2.5 py-1 text-[11px] font-medium text-black transition-opacity hover:bg-white/90 disabled:opacity-50"
             >
               {status === 'connecting' ? 'Connecting…' : 'Connect'}
             </button>

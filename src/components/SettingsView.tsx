@@ -13,6 +13,7 @@ import { AiProviderSection } from '@/components/AiProviderSection';
 import { GithubSection } from '@/components/GithubSection';
 import { GoogleDriveSection } from '@/components/GoogleDriveSection';
 import { AlertsSection } from '@/components/AlertsSection';
+import { McpSection } from '@/components/McpSection';
 import {
   SettingsRow,
   SettingsSection,
@@ -22,6 +23,7 @@ import {
   BotIcon,
   ChartBarIcon,
   CloudUploadIcon,
+  NetworkIcon,
   SettingsIcon,
   SparklesIcon,
 } from '@/lib/icons';
@@ -33,6 +35,7 @@ type SectionId =
   | 'agent'
   | 'monitoring'
   | 'ai'
+  | 'mcp'
   | 'github'
   | 'drive'
   | 'alerts';
@@ -82,6 +85,13 @@ const SECTION_GROUPS: { label: string; items: SectionItem[] }[] = [
         description:
           'Choose which AI powers the agent — an API key, or the Codex ChatGPT subscription. Credentials are stored encrypted on this machine.',
         icon: SparklesIcon,
+      },
+      {
+        id: 'mcp',
+        label: 'Agent Access (MCP)',
+        description:
+          'Let coding agents on this machine — Claude Code, Codex, or any MCP client — work on your servers through this app. The endpoint runs on localhost only and your SSH credentials never leave the app.',
+        icon: NetworkIcon,
       },
       {
         id: 'github',
@@ -286,6 +296,8 @@ export function SettingsView() {
             )}
 
             {section === 'ai' && <AiProviderSection settings={settings} onPatch={patch} />}
+
+            {section === 'mcp' && <McpSection settings={settings} onPatch={patch} />}
 
             {section === 'github' && <GithubSection />}
 
