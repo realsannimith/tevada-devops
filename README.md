@@ -1,10 +1,46 @@
+<div align="center">
+
 # Tevada DevOps
 
-An AI-powered server management desktop app — like Termius, but the AI agent does
-the DevOps work for you. Connect to your Linux servers over SSH, open interactive
-terminals, watch live monitoring dashboards, and tell an AI agent to set up hosting,
-configure backups, or run any command — it executes over SSH and shows you every
-step live.
+**Your AI DevOps engineer, in a desktop app.**
+
+Tell it *"deploy my Next.js app with nginx and free SSL"* — it SSHes into your
+server, runs every command live in front of you, and hands you back a working
+HTTPS site. Like Termius, if Termius did the work for you.
+
+[![Release](https://img.shields.io/github/v/release/realsannimith/tevada-devops?label=download&color=e11d48)](https://github.com/realsannimith/tevada-devops/releases/latest)
+[![Build](https://github.com/realsannimith/tevada-devops/actions/workflows/release.yml/badge.svg)](https://github.com/realsannimith/tevada-devops/actions/workflows/release.yml)
+[![License: PolyForm Noncommercial](https://img.shields.io/badge/license-PolyForm%20Noncommercial-blue)](LICENSE.md)
+![Platforms](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey)
+
+<img src="docs/assets/app-screenshot.png" alt="Tevada DevOps — the AI agent deploying a Next.js app over SSH with nginx and Let's Encrypt, every command shown live" width="900" />
+
+</div>
+
+## Download
+
+Grab the latest release for your OS from the
+[**Releases page**](https://github.com/realsannimith/tevada-devops/releases/latest):
+
+| OS | File |
+|---|---|
+| macOS (Apple Silicon) | `Tevada DevOps-x.y.z-arm64.dmg` (or the `darwin-arm64` zip) |
+| macOS (Intel) | `Tevada DevOps-x.y.z-x64.dmg` (or the `darwin-x64` zip) |
+| Windows | `Tevada DevOps-x.y.z Setup.exe` |
+| Debian / Ubuntu | `tevada-devops_x.y.z_amd64.deb` |
+| Fedora / RHEL | `tevada-devops-x.y.z-1.x86_64.rpm` |
+
+Every release is built from source in public on GitHub Actions — check the
+[build logs](https://github.com/realsannimith/tevada-devops/actions) for any release.
+
+## Why Tevada DevOps?
+
+- 🤖 **The agent does the work** — hosting, TLS, backups, debugging: it plans,
+  runs the commands over SSH, and shows you every command, output, and exit code.
+- 🖥️ **Still a real SSH client** — full interactive terminals, live monitoring
+  dashboards, SFTP file browser. Use it manually whenever you want.
+- 🔐 **Your keys stay yours** — credentials are encrypted with your OS keychain
+  and never leave the main process. Bring your own AI API key.
 
 Built with Electron + Vite + React + Tailwind + shadcn, the Vercel AI SDK, and
 Google Gemini.
@@ -129,3 +165,22 @@ Against a scratch Linux VPS:
    confirm the approval dialog appears.
 5. Open **Monitoring** and run `yes > /dev/null` on the server — CPU spikes.
 6. Run the **Host a website** wizard on a test domain, then **Set up backups**.
+
+## Contributing
+
+Contributions are welcome — bug reports, fixes, and features. Fork, branch, and
+open a PR. Please run the local quality gate before submitting:
+
+```sh
+bun run lint && bun run typecheck && bun run test
+```
+
+CI builds every PR on all platforms for free, so you'll see packaging results
+without owning a Mac, a Windows box, *and* a Linux box.
+
+## License
+
+[PolyForm Noncommercial 1.0.0](LICENSE.md) — free to use, modify, and share for
+**noncommercial purposes** (personal use, education, research, hobby projects).
+**Commercial use is not permitted.** If you'd like to use Tevada DevOps in a
+commercial product or service, open an issue to discuss a separate license.
