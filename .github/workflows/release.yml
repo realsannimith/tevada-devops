@@ -124,6 +124,18 @@ jobs:
         shell: bash
         run: cd node_modules/electron-winstaller && node script/select-7z-arch.js
 
+      # --ignore-scripts also skips cpu-features' install script, which
+      # generates buildcheck.gypi — electron-rebuild's node-gyp pass fails
+      # with "buildcheck.gypi not found" during packaging without it. Its
+      # contents are irrelevant on Windows (every condition inside is
+      # OS!="win"), so fall back to an empty gypi if buildcheck.js can't run.
+      - name: Prepare cpu-features buildcheck (Windows)
+        if: ${{ runner.os == 'Windows' }}
+        shell: bash
+        run: |
+          cd node_modules/cpu-features
+          node buildcheck.js > buildcheck.gypi || printf '{}\n' > buildcheck.gypi
+
       - name: Install Linux packaging tools
         if: ${{ runner.os == 'Linux' }}
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends fakeroot dpkg rpm
