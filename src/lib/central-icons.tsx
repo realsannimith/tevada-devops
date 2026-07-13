@@ -1,9 +1,17 @@
 import { forwardRef, type CSSProperties, type HTMLAttributes } from 'react';
 import { cn } from '@/lib/utils';
 
+// Bare relative paths (NO leading slash). These become CSS mask url()s that
+// resolve against the document base (index.html). In dev that's the Vite
+// server root; in the packaged app the renderer loads over file:// and a
+// leading-slash path would resolve to the FILESYSTEM root instead, so the mask
+// would silently fail to load and the icon would render invisible. Relative
+// paths resolve to the renderer output dir (where public/ assets are copied)
+// in both. Safe because the app has no <base> tag and no path-based routing,
+// so the document URL never moves away from index.html.
 const CENTRAL_ICON_BASE_PATHS = {
-  reversed: '/central-icons-reversed',
-  fill: '/central-icons-fill',
+  reversed: 'central-icons-reversed',
+  fill: 'central-icons-fill',
 } as const;
 
 export type CentralIconVariant = keyof typeof CENTRAL_ICON_BASE_PATHS;
