@@ -52,6 +52,7 @@ import { TevadaMcpServer } from './mcpServer';
 import { installMcpClient } from './mcpInstall';
 import { isProviderId, ProviderId } from '../shared/providers';
 import { AgentToolContext } from '../agent/tools';
+import { loadSkills } from '../agent/skills';
 import { buildModelMessages } from '../agent/attachments';
 import {
   databaseWizardTarget,
@@ -1107,6 +1108,9 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
       connect: connectServer,
       exec: (serverId, command, opts) => cm.exec(serverId, command, opts),
       getStats: (serverId) => monitor.getLatest(serverId),
+      listSkills: loadSkills,
+      sftpWriteFile: (serverId, path, content) =>
+        cm.sftpWriteFile(serverId, path, content),
     },
     (status) => send(IPC.evtMcpStatus, status),
   );

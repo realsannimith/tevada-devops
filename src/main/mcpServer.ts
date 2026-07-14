@@ -24,6 +24,7 @@ import type {
   ServerProfile,
   ServerStats,
 } from '../shared/ipc-types';
+import type { Skill } from '../agent/skills';
 
 /** Everything the tools need, injected by ipc.ts so this file stays testable. */
 export type McpDeps = {
@@ -37,6 +38,10 @@ export type McpDeps = {
     opts: { timeoutMs?: number },
   ) => Promise<ExecResult>;
   getStats: (serverId: string) => ServerStats | undefined;
+  /** The same skill library the in-app agent uses (bundled + user, user wins);
+   *  called per request so user skill edits apply without a restart. */
+  listSkills: () => Skill[];
+  sftpWriteFile: (serverId: string, path: string, content: string) => Promise<void>;
 };
 
 const MAX_COMMAND_TIMEOUT_S = 600;
@@ -47,6 +52,12 @@ const SERVER_INSTRUCTIONS = [
   'Tevada DevOps desktop app. Call list_servers first to see what exists (and',
   'which project each server belongs to), then run_command to execute shell',
   'commands. Connections are opened on demand — you never handle credentials.',
+  'The app also ships a library of vetted DevOps skills (step-by-step',
+  'procedures for deploys, hardening, backups, TLS, troubleshooting…) — the',
+  'same ones its built-in agent follows. BEFORE starting work that matches a',
+  'skill (call list_skills to see them), call load_skill and follow the',
+  'instructions: they encode non-interactive flags, security defaults,',
+  'verification steps, and rollback paths that keep servers safe.',
 ].join(' ');
 
 function text(value: string, isError = false) {
@@ -88,6 +99,17 @@ export function buildMcpServer(deps: McpDeps): McpServer {
       servers.find((s) => s.id === ref) ??
       servers.find((s) => s.name.toLowerCase() === ref.toLowerCase())
     );
+  };
+
+  /** Connect on demand; returns an error string instead of throwing. */
+  const ensureConnected = async (
+    profile: ServerProfile,
+  ): Promise<string | undefined> => {
+    if (deps.getStatus(profile.id) === 'connected') return undefined;
+    const conn = await deps.connect(profile.id);
+    return conn.ok
+      ? undefined
+      : `Could not connect to "${profile.name}": ${conn.error ?? 'unknown error'}`;
   };
 
   registerTool(
@@ -175,15 +197,8 @@ export function buildMcpServer(deps: McpDeps): McpServer {
           true,
         );
       }
-      if (deps.getStatus(profile.id) !== 'connected') {
-        const conn = await deps.connect(profile.id);
-        if (!conn.ok) {
-          return text(
-            `Could not connect to "${profile.name}": ${conn.error ?? 'unknown error'}`,
-            true,
-          );
-        }
-      }
+      const connError = await ensureConnected(profile);
+      if (connError) return text(connError, true);
       const timeoutMs =
         Math.min(
           Math.max(timeoutSeconds ?? DEFAULT_COMMAND_TIMEOUT_S, 1),
@@ -232,6 +247,130 @@ export function buildMcpServer(deps: McpDeps): McpServer {
         );
       }
       return text(JSON.stringify(stats, null, 2));
+    },
+  );
+
+  registerTool(
+    'list_skills',
+    {
+      title: 'List skills',
+      description:
+        "List the DevOps skills available (the same library the app's built-in agent uses): name, one-line description, and whether it is bundled or user-authored. Call load_skill before doing work a skill covers.",
+      inputSchema: {},
+    },
+    () => {
+      const rows = deps.listSkills().map((s) => ({
+        name: s.name,
+        description: s.description,
+        source: s.source,
+      }));
+      return text(JSON.stringify(rows, null, 2));
+    },
+  );
+
+  registerTool(
+    'load_skill',
+    {
+      title: 'Load skill',
+      description:
+        'Load the full step-by-step instructions for a skill before doing work it covers. The instructions encode hard-won details (non-interactive flags, security defaults, verification steps, rollback paths) — follow them.',
+      inputSchema: {
+        name: z.string().describe('The skill name, exactly as in list_skills.'),
+      },
+    },
+    (args: unknown) => {
+      const { name } = args as { name: string };
+      const skills = deps.listSkills();
+      const found = skills.find((s) => s.name === name.trim());
+      if (!found) {
+        return text(
+          `Unknown skill "${name}". Available skills: ${skills.map((s) => s.name).join(', ')}`,
+          true,
+        );
+      }
+      return text(found.body);
+    },
+  );
+
+  registerTool(
+    'write_file',
+    {
+      title: 'Write file',
+      description:
+        'Write text content to a file on a server over SFTP (connects automatically). Set sudo=true to write a root-owned file (content is staged in /tmp then moved with sudo). Prefer this over heredocs in run_command for scripts and config files.',
+      inputSchema: {
+        server: z.string().describe('Server id or name (see list_servers).'),
+        path: z.string().describe('Absolute destination path.'),
+        content: z.string().describe('Full file content to write.'),
+        mode: z
+          .string()
+          .optional()
+          .describe('Optional octal mode, e.g. "644" or "755".'),
+        sudo: z
+          .boolean()
+          .optional()
+          .describe('Write as root via a staged sudo move (default false).'),
+      },
+    },
+    async (args: unknown) => {
+      const { server: ref, path, content, mode, sudo } = args as {
+        server: string;
+        path: string;
+        content: string;
+        mode?: string;
+        sudo?: boolean;
+      };
+      const profile = resolveServer(ref);
+      if (!profile) {
+        return text(
+          `Unknown server "${ref}". Call list_servers to see available servers.`,
+          true,
+        );
+      }
+      const connError = await ensureConnected(profile);
+      if (connError) return text(connError, true);
+      if (mode && !/^[0-7]{3,4}$/.test(mode)) {
+        return text(`Invalid mode "${mode}" — use octal like 644 or 755.`, true);
+      }
+      const dest = path.replace(/'/g, '');
+      let stagedTmp: string | undefined;
+      try {
+        if (sudo) {
+          const tmp = `/tmp/easyhost-mcp-${Date.now()}-${content.length}`;
+          stagedTmp = tmp;
+          await deps.sftpWriteFile(profile.id, tmp, content);
+          const chmod = mode ? `sudo chmod ${mode} '${dest}'; ` : '';
+          const res = await deps.exec(
+            profile.id,
+            `sudo mv '${tmp}' '${dest}'; ${chmod}echo done`,
+            { timeoutMs: 30_000 },
+          );
+          if (res.exitCode !== 0) {
+            return text(`Write failed: ${res.stderr || res.stdout}`, true);
+          }
+        } else {
+          await deps.sftpWriteFile(profile.id, dest, content);
+          if (mode) {
+            await deps.exec(profile.id, `chmod ${mode} '${dest}'`, {
+              timeoutMs: 10_000,
+            });
+          }
+        }
+        return text(`Wrote ${content.length} bytes to ${dest}`);
+      } catch (err) {
+        return text(
+          `Write failed: ${err instanceof Error ? err.message : String(err)}`,
+          true,
+        );
+      } finally {
+        // If a sudo write failed after staging, don't leave the (possibly
+        // sensitive) content sitting in /tmp.
+        if (stagedTmp) {
+          void deps
+            .exec(profile.id, `rm -f '${stagedTmp}'`, { timeoutMs: 5000 })
+            .catch((): void => {});
+        }
+      }
     },
   );
 
