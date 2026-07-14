@@ -42,7 +42,7 @@ import {
 import { WorldIcon } from '@/lib/brand-icons';
 import { formatBytes } from '@/lib/attachments';
 import { computeDnsRecordName } from '@/lib/dns';
-import { cn } from '@/lib/utils';
+import { cn, formatCount } from '@/lib/utils';
 import type {
   FeedItem,
   PendingApproval,
@@ -198,8 +198,11 @@ export function AgentFeed({
             decision: no live counter while generating) and stays at the tail
             of the transcript. */}
         {!running && tokens > 0 && feed.length > 0 && (
-          <p className="pt-0.5 text-[11px] tabular-nums text-muted-foreground/60">
-            {tokens.toLocaleString()} tokens
+          <p
+            className="pt-0.5 text-[11px] tabular-nums text-muted-foreground/60"
+            title={`${tokens.toLocaleString()} tokens`}
+          >
+            {formatCount(tokens)} tokens
           </p>
         )}
         {error && (
