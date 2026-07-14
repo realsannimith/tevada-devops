@@ -27,6 +27,18 @@ CI service.
 - If a private repo is missing from `listGithubRepos`, the user likely picked
   "Only select repositories" without it — tell them to add it via Settings →
   GitHub → "Manage repository access" (it opens the GitHub installation page).
+- **Clone fails with 403 / "Write access to repository not granted" /
+  "Repository not found" despite installed credentials**: GitHub's wording is
+  misleading — the connected account cannot READ that repository at all. This
+  is the standard failure for **organization-owned** repos when the GitHub App
+  is only installed on the personal account, or the user connected with a
+  fine-grained token whose resource owner is their personal account. Do not
+  fall back to SSH deploy keys or ask for tokens in chat: tell the user to fix
+  access under Settings → GitHub (install the app on the organization / add
+  the repo, or reconnect with a token created for the organization), wait for
+  their confirmation, verify with `listGithubRepos`, then retry the same
+  clone. A read-only deploy key is the last resort, only when the user cannot
+  change the organization's GitHub settings.
 
 Record the branch to track (default: the repo's default branch, usually `main`).
 

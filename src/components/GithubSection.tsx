@@ -460,6 +460,14 @@ export function GithubSection() {
                 <GithubIcon className="size-4" />
                 {busy ? 'Verifying…' : 'Connect with token'}
               </Button>
+              <p className="text-[11px] text-muted-foreground">
+                Classic tokens need the <span className="font-mono">repo</span>{' '}
+                scope. Fine-grained tokens need{' '}
+                <span className="font-mono">Contents: read</span> — and only
+                reach the account you picked as resource owner, so for an
+                organization&apos;s repositories the token must be created with
+                that organization as resource owner.
+              </p>
             </div>
           )}
           {status.deviceFlowAvailable && (

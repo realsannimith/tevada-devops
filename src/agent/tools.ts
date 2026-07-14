@@ -460,7 +460,7 @@ export function buildTools(ctx: AgentToolContext) {
 
     listGithubRepos: tool({
       description:
-        'List the GitHub repositories the user connected to this app (full name, default branch, private flag). Use when the user says "my repo" / wants to deploy from GitHub, to resolve the exact owner/repo name and confirm access. Servers in authorizedServerIds can already run git clone/pull/push for these repos (credentials pre-installed); if the target server is not in that list, ask the user to enable it under Settings → GitHub instead of handling tokens in shell commands.',
+        'List the GitHub repositories the user connected to this app (full name, default branch, private flag). Use when the user says "my repo" / wants to deploy from GitHub, to resolve the exact owner/repo name and confirm access. Servers in authorizedServerIds can already run git clone/pull/push for these repos (credentials pre-installed); if the target server is not in that list, ask the user to enable it under Settings → GitHub instead of handling tokens in shell commands. If the repo the user wants is MISSING from this list, the connected account cannot reach it (common for organization-owned repos) and cloning will fail with a misleading 403 "Write access to repository not granted" — do not work around it with deploy keys or pasted tokens; tell the user to grant access under Settings → GitHub, then call this tool again to confirm before cloning.',
       inputSchema: z.object({}),
       execute: async () => {
         const res = await ctx.listGithubRepos();

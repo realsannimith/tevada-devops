@@ -402,11 +402,31 @@ export async function startDeviceFlow(
 
 // --- personal access token ----------------------------------------------------
 
+/** Fine-grained PATs (github_pat_…) don't advertise scopes in the response
+ *  header and only reach the repos of the resource owner picked at creation. */
+function isFineGrainedPat(token: string): boolean {
+  return token.startsWith('github_pat_');
+}
+
 export async function connectWithToken(token: string): Promise<GithubStatus> {
   const trimmed = token.trim();
   if (!trimmed) throw new Error('Paste a token first.');
   const user = await fetchUser(trimmed);
+  // Catch scope problems at connect time, not at the first failed clone:
+  // classic tokens report their scopes in the x-oauth-scopes header.
+  if (!isFineGrainedPat(trimmed) && user.scopes !== undefined) {
+    const scopes = user.scopes.split(',').map((s) => s.trim());
+    if (!scopes.includes('repo')) {
+      throw new Error(
+        'This token is missing the "repo" scope, so private repositories cannot be cloned with it. Create a classic token with "repo" checked, or a fine-grained token with Contents read access.',
+      );
+    }
+  }
+  if (isFineGrainedPat(trimmed)) user.scopes = 'fine-grained token';
   saveConnection({ access_token: trimmed }, user, 'token');
+  // Servers authorized under a previous connection keep a copy of the old
+  // token in their credential store — swap in the new one right away.
+  void syncAuthorizedServers(trimmed);
   return getStatus();
 }
 
@@ -641,6 +661,28 @@ function execError(r: ExecResult, token: string): string {
   return detail || `Command exited with code ${r.exitCode}.`;
 }
 
+/**
+ * GitHub's HTTP-clone errors are misleading: a credential that cannot READ a
+ * repo at all gets "Write access to repository not granted" (403), and one
+ * that cannot see it gets "Repository not found". Translate into what the
+ * user actually has to do — which depends on how they connected.
+ */
+function diagnoseCloneAccessError(detail: string): string | undefined {
+  if (
+    !/write access to repository not granted|repository not found|the requested url returned error: 403/i.test(
+      detail,
+    )
+  ) {
+    return undefined;
+  }
+  const method = store.getGithubAccount()?.method;
+  const fix =
+    method === 'app'
+      ? 'open Settings → GitHub → Repository access and install the app on the account or organization that owns the repo (or add the repo to its selected repositories)'
+      : 'reconnect in Settings → GitHub with a token that can reach it — a classic token with the "repo" scope, or a fine-grained token created with the repository\'s owner (for org repos: the organization, not your personal account) as resource owner and Contents read access';
+  return `The connected GitHub account cannot access this repository — GitHub words this as a write/not-found error even when the real problem is read access. To fix it, ${fix}. Organization repos may additionally require the org to approve the token or app.`;
+}
+
 /** Install/replace the github.com entry in a server's git credential store. */
 async function writeServerCredentials(
   cm: ConnectionManager,
@@ -785,7 +827,11 @@ export async function cloneRepo(
   const cleanUrl = `https://github.com/${repoFullName}.git`;
   const cmd = `git clone '${authedUrl}' '${dest}' && git -C '${dest}' remote set-url origin '${cleanUrl}' && readlink -f '${dest}'`;
   const r = await cm.exec(serverId, cmd, { timeoutMs: 10 * 60_000, maxOutputBytes: 64_000 });
-  if (r.exitCode !== 0) return { ok: false, error: execError(r, token) };
+  if (r.exitCode !== 0) {
+    const raw = execError(r, token);
+    const hint = diagnoseCloneAccessError(raw);
+    return { ok: false, error: hint ? `${raw}\n\n${hint}` : raw };
+  }
   const path = r.stdout.trim().split('\n').pop() ?? dest;
   return { ok: true, path };
 }
