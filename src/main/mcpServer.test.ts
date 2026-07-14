@@ -48,6 +48,22 @@ function makeDeps(overrides: Partial<McpDeps> = {}): McpDeps {
     getStats: () => undefined,
     listSkills: () => SKILLS,
     sftpWriteFile: vi.fn(async () => undefined),
+    listGithubRepos: vi.fn(async () => ({
+      ok: true as const,
+      repos: [
+        {
+          fullName: 'acme/site',
+          private: true,
+          defaultBranch: 'main',
+          description: 'Site',
+        },
+      ],
+    })) as unknown as McpDeps['listGithubRepos'],
+    githubAuthorizedServerIds: () => ['srv-1'],
+    setupDeployNotifications: vi.fn(async () => ({
+      ok: true,
+      telegramConfigured: false,
+    })),
     ...overrides,
   };
 }
@@ -72,11 +88,13 @@ describe('mcp server tools', () => {
     const { tools } = await client.listTools();
     expect(tools.map((t) => t.name).sort()).toEqual([
       'get_server_stats',
+      'list_github_repos',
       'list_projects',
       'list_servers',
       'list_skills',
       'load_skill',
       'run_command',
+      'setup_deploy_notifications',
       'write_file',
     ]);
   });
@@ -91,13 +109,14 @@ describe('mcp server tools', () => {
     ]);
   });
 
-  it('load_skill returns the full body, and errors on unknown names', async () => {
+  it('load_skill returns the body with the MCP tool-name mapping, and errors on unknown names', async () => {
     const client = await connect(makeDeps());
     const ok = await client.callTool({
       name: 'load_skill',
       arguments: { name: 'docker-deploy' },
     });
     expect(firstText(ok)).toContain('# Docker deploy');
+    expect(firstText(ok)).toContain('runCommand → run_command');
     expect(ok.isError).toBeFalsy();
 
     const bad = await client.callTool({
@@ -157,6 +176,47 @@ describe('mcp server tools', () => {
       arguments: { server: 'ghost', path: '/x', content: 'c' },
     });
     expect(badServer.isError).toBe(true);
+  });
+
+  it('list_github_repos returns repos plus credentialed servers, and surfaces errors', async () => {
+    const client = await connect(makeDeps());
+    const ok = await client.callTool({ name: 'list_github_repos', arguments: {} });
+    const parsed = JSON.parse(firstText(ok)) as {
+      authorizedServerIds: string[];
+      repos: { fullName: string }[];
+    };
+    expect(parsed.authorizedServerIds).toEqual(['srv-1']);
+    expect(parsed.repos[0].fullName).toBe('acme/site');
+
+    const deps = makeDeps({
+      listGithubRepos: async () => ({ ok: false as const, error: 'GitHub is not connected.' }),
+    });
+    const bad = await (await connect(deps)).callTool({
+      name: 'list_github_repos',
+      arguments: {},
+    });
+    expect(bad.isError).toBe(true);
+    expect(firstText(bad)).toContain('Settings → GitHub');
+  });
+
+  it('setup_deploy_notifications connects and returns the provision result', async () => {
+    const deps = makeDeps({ getStatus: () => 'disconnected' });
+    const client = await connect(deps);
+    const res = await client.callTool({
+      name: 'setup_deploy_notifications',
+      arguments: { server: 'DGO' },
+    });
+    // "DGO" doesn't resolve — unknown server error path.
+    expect(res.isError).toBe(true);
+
+    const ok = await client.callTool({
+      name: 'setup_deploy_notifications',
+      arguments: { server: 'Staging' },
+    });
+    expect(ok.isError).toBeFalsy();
+    expect(deps.connect).toHaveBeenCalledWith('srv-1');
+    expect(deps.setupDeployNotifications).toHaveBeenCalledWith('srv-1');
+    expect(JSON.parse(firstText(ok))).toEqual({ ok: true, telegramConfigured: false });
   });
 
   it('run_command connects on demand and reports exit codes', async () => {

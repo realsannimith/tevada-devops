@@ -1111,6 +1111,20 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
       listSkills: loadSkills,
       sftpWriteFile: (serverId, path, content) =>
         cm.sftpWriteFile(serverId, path, content),
+      listGithubRepos: () => github.listRepos(),
+      githubAuthorizedServerIds: () =>
+        store.getGithubAccount()?.authorizedServerIds ?? [],
+      setupDeployNotifications: (serverId) => {
+        // Same as the in-app agent: token + chat stay in main; callers only
+        // ever see ok/telegramConfigured.
+        const token = alerts.loadToken();
+        const chatId = store.getAlertConfig().chatId;
+        return deployments.provisionDeployNotifications(
+          cm,
+          serverId,
+          token && chatId ? { token, chatId } : undefined,
+        );
+      },
     },
     (status) => send(IPC.evtMcpStatus, status),
   );

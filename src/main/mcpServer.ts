@@ -19,6 +19,7 @@ import { z } from 'zod/v3';
 import type {
   ConnStatus,
   ExecResult,
+  GithubReposResult,
   McpStatus,
   Project,
   ServerProfile,
@@ -42,6 +43,11 @@ export type McpDeps = {
    *  called per request so user skill edits apply without a restart. */
   listSkills: () => Skill[];
   sftpWriteFile: (serverId: string, path: string, content: string) => Promise<void>;
+  listGithubRepos: () => Promise<GithubReposResult>;
+  githubAuthorizedServerIds: () => string[];
+  setupDeployNotifications: (
+    serverId: string,
+  ) => Promise<{ ok: boolean; telegramConfigured?: boolean; error?: string }>;
 };
 
 const MAX_COMMAND_TIMEOUT_S = 600;
@@ -288,7 +294,81 @@ export function buildMcpServer(deps: McpDeps): McpServer {
           true,
         );
       }
-      return text(found.body);
+      // Skills are written for the in-app agent, whose tools have different
+      // names (and a few that don't exist over MCP) — translate up front so
+      // external agents don't stall looking for `runCommand`.
+      const mapping = [
+        'Note — this skill was written for the app\'s built-in agent; in this MCP context map its tool names as follows:',
+        '- runCommand → run_command; writeRemoteFile → write_file; listGithubRepos → list_github_repos; setupDeployNotifications → setup_deploy_notifications.',
+        '- runScript → write the script with write_file, then execute it with run_command.',
+        '- generatePassword → generate one yourself (e.g. `openssl rand -base64 24` via run_command) and avoid echoing secrets into shell history.',
+        '- updateTodos and request…Setup form tools → not available here; track your own plan and ask the user for those values in your own conversation.',
+        '',
+      ].join('\n');
+      return text(mapping + found.body);
+    },
+  );
+
+  registerTool(
+    'list_github_repos',
+    {
+      title: 'List GitHub repos',
+      description:
+        'List the GitHub repositories the user connected to the Tevada DevOps app (full name, default branch, private flag), plus authorizedServerIds — the servers whose git credential store already holds the user\'s GitHub token, so git clone/pull/push for these repos just works there. If a repo the user wants is MISSING from the list, the connected account cannot reach it (cloning would fail with a misleading 403 "Write access to repository not granted") — tell the user to grant access in the app under Settings → GitHub instead of working around it with deploy keys or pasted tokens.',
+      inputSchema: {},
+    },
+    async () => {
+      const res = await deps.listGithubRepos();
+      if (res.ok === false) {
+        return text(
+          `GitHub is not available: ${res.error}. The user can connect it in the app under Settings → GitHub.`,
+          true,
+        );
+      }
+      return text(
+        JSON.stringify(
+          {
+            authorizedServerIds: deps.githubAuthorizedServerIds(),
+            repos: res.repos.slice(0, 100).map((r) => ({
+              fullName: r.fullName,
+              private: r.private,
+              defaultBranch: r.defaultBranch,
+              description: r.description,
+            })),
+          },
+          null,
+          2,
+        ),
+      );
+    },
+  );
+
+  registerTool(
+    'setup_deploy_notifications',
+    {
+      title: 'Set up deploy notifications',
+      description:
+        'Install the Tevada DevOps deploy-notification helper (/usr/local/bin/easyhost-notify) on a server. Call this once while setting up any automated deployment (e.g. GitHub auto-deploy). The helper records deploy events for the app\'s Deploys tab and, when the user has connected Telegram in the app, also messages them on deploy success/failure — the bot token is provisioned by the app itself and never passes through you. Afterwards make the deploy script report transitions: /usr/local/bin/easyhost-notify "<app>" ok|failed|rollback "<short message>". If the result has telegramConfigured=false, deploy history still works — tell the user to connect Telegram under Settings → Alerts for push notifications.',
+      inputSchema: {
+        server: z.string().describe('Server id or name (see list_servers).'),
+      },
+    },
+    async (args: unknown) => {
+      const { server: ref } = args as { server: string };
+      const profile = resolveServer(ref);
+      if (!profile) {
+        return text(
+          `Unknown server "${ref}". Call list_servers to see available servers.`,
+          true,
+        );
+      }
+      const connError = await ensureConnected(profile);
+      if (connError) return text(connError, true);
+      const res = await deps.setupDeployNotifications(profile.id);
+      if (!res.ok) {
+        return text(`Install failed: ${res.error ?? 'unknown error'}`, true);
+      }
+      return text(JSON.stringify(res, null, 2));
     },
   );
 
