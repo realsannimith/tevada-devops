@@ -79,7 +79,7 @@ type ToolResult = {
 /** Builds one MCP server instance. Stateless transport = one per request. */
 export function buildMcpServer(deps: McpDeps): McpServer {
   const server = new McpServer(
-    { name: 'tevada-devops', version: '1.0.0' },
+    { name: 'tevada-devops', version: '1.0.1' },
     { instructions: SERVER_INSTRUCTIONS },
   );
 
