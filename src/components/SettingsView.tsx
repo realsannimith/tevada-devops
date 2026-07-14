@@ -14,6 +14,7 @@ import { GithubSection } from '@/components/GithubSection';
 import { GoogleDriveSection } from '@/components/GoogleDriveSection';
 import { AlertsSection } from '@/components/AlertsSection';
 import { McpSection } from '@/components/McpSection';
+import { UpdateSection } from '@/components/UpdateSection';
 import {
   SettingsRow,
   SettingsSection,
@@ -22,6 +23,7 @@ import { GithubIcon, TelegramIcon } from '@/lib/brand-icons';
 import {
   BotIcon,
   ChartBarIcon,
+  CloudDownloadIcon,
   CloudUploadIcon,
   NetworkIcon,
   SettingsIcon,
@@ -38,7 +40,8 @@ type SectionId =
   | 'mcp'
   | 'github'
   | 'drive'
-  | 'alerts';
+  | 'alerts'
+  | 'updates';
 
 type SectionItem = {
   id: SectionId;
@@ -66,6 +69,13 @@ const SECTION_GROUPS: { label: string; items: SectionItem[] }[] = [
         description: 'How much the agent may do on its own, and for how long.',
         icon: BotIcon,
         settingsKeys: ['approvalMode', 'agentMaxSteps'],
+      },
+      {
+        id: 'updates',
+        label: 'Updates',
+        description:
+          'Keep the app current: new versions are detected automatically and can be downloaded and installed right here.',
+        icon: CloudDownloadIcon,
       },
       {
         id: 'monitoring',
@@ -304,6 +314,8 @@ export function SettingsView() {
             {section === 'drive' && <GoogleDriveSection />}
 
             {section === 'alerts' && <AlertsSection />}
+
+            {section === 'updates' && <UpdateSection />}
           </div>
         )}
       </div>

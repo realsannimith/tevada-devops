@@ -50,6 +50,7 @@ import * as aiKeys from './aiKeys';
 import * as codexAuth from './codexAuth';
 import { TevadaMcpServer } from './mcpServer';
 import { installMcpClient } from './mcpInstall';
+import { AppUpdater } from './updater';
 import { isProviderId, ProviderId } from '../shared/providers';
 import { AgentToolContext } from '../agent/tools';
 import { loadSkills } from '../agent/skills';
@@ -1153,6 +1154,15 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
       return installMcpClient(arg.client, target);
     },
   );
+
+  // --- in-app updates --------------------------------------------------------
+
+  const updater = new AppUpdater((state) => send(IPC.evtUpdateState, state));
+  updater.startAutoChecks();
+  ipcMain.handle(IPC.updateState, () => updater.getState());
+  ipcMain.handle(IPC.updateCheck, () => updater.check());
+  ipcMain.handle(IPC.updateInstall, () => updater.downloadAndInstall());
+  ipcMain.handle(IPC.updateOpenReleases, () => updater.openReleasesPage());
 
   // Auto-start if the user left it enabled last session.
   if (store.getSettings().mcpEnabled) {

@@ -1052,6 +1052,11 @@ export const IPC = {
   mcpStart: 'mcp:start',
   mcpStop: 'mcp:stop',
   mcpInstall: 'mcp:install',
+  // in-app updates (invoke)
+  updateState: 'update:state',
+  updateCheck: 'update:check',
+  updateInstall: 'update:install',
+  updateOpenReleases: 'update:open-releases',
 
   // events (main -> renderer)
   evtSshStatus: 'ssh:status',
@@ -1066,7 +1071,37 @@ export const IPC = {
   evtChatHistory: 'chat-history:changed',
   evtAlert: 'alerts:event',
   evtMcpStatus: 'mcp:status-changed',
+  evtUpdateState: 'update:state-changed',
 } as const;
+
+// ---------------------------------------------------------------------------
+// In-app updates
+// ---------------------------------------------------------------------------
+
+/** Live state of the in-app updater, for the Settings UI. */
+export type UpdateState = {
+  status:
+    | 'idle'
+    | 'checking'
+    | 'up-to-date'
+    | 'available'
+    | 'downloading'
+    | 'installing'
+    | 'error'
+    | 'disabled';
+  currentVersion: string;
+  /** Newer version found on the releases feed (without the leading "v"). */
+  availableVersion?: string;
+  /** Release page for the available version (notes + manual downloads). */
+  releaseUrl?: string;
+  /** False when this platform has no installer asset (fall back to the page). */
+  canInstallInApp?: boolean;
+  downloadPercent?: number;
+  checkedAt?: string;
+  error?: string;
+  /** Why updates are off entirely (dev build, Linux package install). */
+  disabledReason?: string;
+};
 
 // ---------------------------------------------------------------------------
 // Local MCP server (agent access)

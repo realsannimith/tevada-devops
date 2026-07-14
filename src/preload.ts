@@ -44,6 +44,7 @@ import {
   McpInstallClient,
   McpInstallResult,
   McpStatus,
+  UpdateState,
   MonitorStatsEvent,
   PlaybookMeta,
   Project,
@@ -385,6 +386,14 @@ const easyhost = {
       ipcRenderer.invoke(IPC.mcpInstall, { client }),
     onStatus: (cb: (s: McpStatus) => void) =>
       on<McpStatus>(IPC.evtMcpStatus, cb),
+  },
+  updates: {
+    state: (): Promise<UpdateState> => ipcRenderer.invoke(IPC.updateState),
+    check: (): Promise<UpdateState> => ipcRenderer.invoke(IPC.updateCheck),
+    install: (): Promise<UpdateState> => ipcRenderer.invoke(IPC.updateInstall),
+    openReleases: (): Promise<void> => ipcRenderer.invoke(IPC.updateOpenReleases),
+    onState: (cb: (s: UpdateState) => void) =>
+      on<UpdateState>(IPC.evtUpdateState, cb),
   },
 };
 
