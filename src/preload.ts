@@ -51,6 +51,7 @@ import {
   UpdateState,
   MonitorStatsEvent,
   PlaybookMeta,
+  TemplateMeta,
   Project,
   SaveDatabaseCredentialRequest,
   ServerAlertConfig,
@@ -262,6 +263,10 @@ const easyhost = {
 
   playbooks: {
     list: (): Promise<PlaybookMeta[]> => ipcRenderer.invoke(IPC.playbooksList),
+  },
+
+  templates: {
+    list: (): Promise<TemplateMeta[]> => ipcRenderer.invoke(IPC.templatesList),
   },
 
   artifacts: {

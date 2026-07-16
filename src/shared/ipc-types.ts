@@ -667,6 +667,24 @@ export type PlaybookMeta = {
 };
 
 // ---------------------------------------------------------------------------
+// App templates (Dokploy-format open-source app catalog)
+// ---------------------------------------------------------------------------
+
+/** One entry of the template registry index, as shown in the gallery. The
+ *  blueprint files (compose + toml) stay in main and never cross IPC — a
+ *  deploy is a normal agent run seeded with the generated prompt. */
+export type TemplateMeta = {
+  id: string;
+  name: string;
+  version: string;
+  description: string;
+  /** Absolute URL of the logo in the registry (undefined if none). */
+  logoUrl?: string;
+  links: { github?: string; website?: string; docs?: string };
+  tags: string[];
+};
+
+// ---------------------------------------------------------------------------
 // GitHub account connection
 // ---------------------------------------------------------------------------
 
@@ -1124,6 +1142,8 @@ export const IPC = {
   codexLogout: 'codex:logout',
   // playbooks (invoke)
   playbooksList: 'playbooks:list',
+  // app templates (invoke) — the Wizards tab's open-source app gallery
+  templatesList: 'templates:list',
   // artifacts (invoke)
   artifactsScan: 'artifacts:scan',
   artifactsAction: 'artifacts:action',
@@ -1301,6 +1321,10 @@ export type AgentStartRequest = {
   projectId?: string | null;
   playbookId?: string;
   playbookValues?: Record<string, string>;
+  /** Deploy an app template (Dokploy-format blueprint): main fetches the
+   *  blueprint, generates secrets/domains, and seeds the run with the deploy
+   *  prompt. Mutually exclusive with playbookId. */
+  templateId?: string;
   /** Files/images attached to the final user message — applied to the last
    *  user turn as multimodal content when the model is called. */
   attachments?: ChatAttachment[];

@@ -45,10 +45,13 @@ import type {
   ChatSessionStatus,
   PlaybookInput,
   PlaybookMeta,
+  TemplateMeta,
 } from '@/shared/ipc-types';
 
 const FIELD_LABEL_CLASS =
   'text-[11px] font-medium tracking-[-0.015em] text-muted-foreground';
+const SECTION_LABEL_CLASS =
+  'mb-3 text-xs font-semibold tracking-[-0.015em] text-ink';
 const FIELD_CONTROL_CLASS =
   'w-full border-border bg-secondary shadow-none hover:bg-accent focus-visible:border-foreground/30 dark:bg-secondary dark:hover:bg-accent';
 
@@ -62,6 +65,54 @@ const PLAYBOOK_GLYPHS: Record<string, AppIcon> = {
 
 function playbookGlyph(id: string): AppIcon {
   return PLAYBOOK_GLYPHS[id] ?? WizardsIcon;
+}
+
+/** History sessions for template deploys are keyed like playbooks, with this
+ *  prefix so the two id spaces can't collide. */
+const TEMPLATE_PLAYBOOK_PREFIX = 'template:';
+
+/** A template deploy reuses the whole wizard run screen; this pseudo playbook
+ *  is what stands in for it (no inputs — everything is auto-generated). */
+function templateAsPlaybook(t: TemplateMeta): PlaybookMeta {
+  return {
+    id: `${TEMPLATE_PLAYBOOK_PREFIX}${t.id}`,
+    title: t.name,
+    description: t.description,
+    inputs: [],
+  };
+}
+
+/** Registry-hosted app logo with a quiet glyph fallback when the image is
+ *  missing or the registry is unreachable. */
+function TemplateLogo({
+  template,
+  className,
+}: {
+  template: TemplateMeta;
+  className?: string;
+}) {
+  const [failed, setFailed] = useState(false);
+  if (!template.logoUrl || failed) {
+    return (
+      <span
+        className={cn(
+          'skill-chip flex items-center justify-center rounded-lg',
+          className,
+        )}
+      >
+        <SidebarGlyph icon={WizardsIcon} variant="leading" />
+      </span>
+    );
+  }
+  return (
+    <img
+      src={template.logoUrl}
+      alt=""
+      loading="lazy"
+      onError={() => setFailed(true)}
+      className={cn('rounded-lg object-contain', className)}
+    />
+  );
 }
 
 /** Brand-mark strip shown on the database wizard card. */
@@ -93,6 +144,13 @@ export function WizardsView() {
   const { servers } = useServers();
   const [playbooks, setPlaybooks] = useState<PlaybookMeta[]>([]);
   const [selected, setSelected] = useState<PlaybookMeta | null>(null);
+  // Set when `selected` is a template deploy (drives the info panel + logo).
+  const [selectedTemplate, setSelectedTemplate] = useState<TemplateMeta | null>(
+    null,
+  );
+  const [templates, setTemplates] = useState<TemplateMeta[]>([]);
+  const [templateQuery, setTemplateQuery] = useState('');
+  const [activeTag, setActiveTag] = useState<string | null>(null);
   const [values, setValues] = useState<Record<string, string>>({});
   const [serverId, setServerId] = useState<string>('');
   // The run whose transcript is (or was) streaming into the feed. Stays set
@@ -127,6 +185,7 @@ export function WizardsView() {
 
   useEffect(() => {
     window.easyhost.playbooks.list().then(setPlaybooks).catch(() => {});
+    window.easyhost.templates.list().then(setTemplates).catch(() => {});
   }, []);
 
   // Keep the sidebar's "Wizards" running indicator in sync from any screen.
@@ -161,6 +220,31 @@ export function WizardsView() {
     }
     return map;
   }, [wizardSessions]);
+
+  // Most-used tags across the catalog, for the gallery's filter chip row.
+  const topTags = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const t of templates) {
+      for (const tag of t.tags) counts.set(tag, (counts.get(tag) ?? 0) + 1);
+    }
+    return [...counts.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 12)
+      .map(([tag]) => tag);
+  }, [templates]);
+
+  const filteredTemplates = useMemo(() => {
+    const q = templateQuery.trim().toLowerCase();
+    return templates.filter((t) => {
+      if (activeTag && !t.tags.includes(activeTag)) return false;
+      if (!q) return true;
+      return (
+        t.name.toLowerCase().includes(q) ||
+        t.description.toLowerCase().includes(q) ||
+        t.tags.some((tag) => tag.toLowerCase().includes(q))
+      );
+    });
+  }, [templates, templateQuery, activeTag]);
 
   const buildRunSession = (
     run: ActiveWizardRun,
@@ -240,7 +324,14 @@ export function WizardsView() {
 
   /** Open a saved wizard run's transcript (read-only; nothing is re-run). */
   function loadSavedRun(session: ChatSession) {
+    const template = session.playbookId?.startsWith(TEMPLATE_PLAYBOOK_PREFIX)
+      ? templates.find(
+          (t) =>
+            t.id === session.playbookId!.slice(TEMPLATE_PLAYBOOK_PREFIX.length),
+        ) ?? null
+      : null;
     const playbook =
+      (template && templateAsPlaybook(template)) ??
       playbooks.find((p) => p.id === session.playbookId) ??
       ({
         id: session.playbookId ?? 'unknown',
@@ -248,6 +339,7 @@ export function WizardsView() {
         description: 'Saved wizard run',
         inputs: [],
       } satisfies PlaybookMeta);
+    setSelectedTemplate(template);
     setSelected(playbook);
     setValues({});
     setActiveRun(null);
@@ -303,6 +395,7 @@ export function WizardsView() {
         persistRunNow('cancelled');
       }
       setSelected(pb);
+      setSelectedTemplate(null);
       setValues(detail.values);
       setServerId(detail.serverId);
       setActiveRun(null);
@@ -314,11 +407,12 @@ export function WizardsView() {
     return () => window.removeEventListener(WIZARD_LAUNCH_EVENT, handleLaunch);
   }, [running, playbooks]);
 
-  function choose(pb: PlaybookMeta) {
+  function choose(pb: PlaybookMeta, template: TemplateMeta | null = null) {
     // Re-opening the playbook whose run is still streaming: reattach to the
     // live feed instead of resetting anything.
     if (running && activeRun?.playbook.id === pb.id) {
       setSelected(pb);
+      setSelectedTemplate(template);
       return;
     }
     if (running) {
@@ -328,6 +422,7 @@ export function WizardsView() {
       persistRunNow('cancelled');
     }
     setSelected(pb);
+    setSelectedTemplate(template);
     setValues({});
     setActiveRun(null);
     clear();
@@ -368,6 +463,17 @@ export function WizardsView() {
     replaceFeed([]);
     const serverName =
       servers.find((s) => s.id === serverId)?.name ?? 'the target server';
+    if (selectedTemplate) {
+      await start(
+        {
+          messages: [],
+          serverIds: [serverId],
+          templateId: selectedTemplate.id,
+        },
+        `Deploy app template "${selectedTemplate.name}" (${selectedTemplate.version}) on ${serverName}.`,
+      );
+      return;
+    }
     await start(
       {
         messages: [],
@@ -390,7 +496,7 @@ export function WizardsView() {
   if (!selected) {
     return (
       <div className="h-full overflow-y-auto bg-background p-6">
-        <div className="mx-auto max-w-3xl">
+        <div className="mx-auto max-w-5xl">
           <header className="mb-6">
             <div className="flex items-center gap-2.5">
               <span className="skill-chip flex size-6 items-center justify-center rounded-full">
@@ -407,7 +513,9 @@ export function WizardsView() {
               </div>
             </div>
           </header>
-          <div className="grid gap-3 sm:grid-cols-2">
+
+          <h2 className={SECTION_LABEL_CLASS}>Server tasks</h2>
+          <div className="mb-8 grid gap-3 sm:grid-cols-2">
             {playbooks.map((pb) => {
               const cardStatus: ChatSessionStatus | undefined =
                 running && activeRun?.playbook.id === pb.id
@@ -443,6 +551,101 @@ export function WizardsView() {
               );
             })}
           </div>
+
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h2 className={cn(SECTION_LABEL_CLASS, 'mb-0')}>
+                Deploy an open-source app
+              </h2>
+              <p className="mt-0.5 text-[11px] text-muted-foreground">
+                One-click Docker Compose deploys — passwords and hostnames are
+                generated for you.
+              </p>
+            </div>
+            <Input
+              value={templateQuery}
+              onChange={(e) => setTemplateQuery(e.target.value)}
+              placeholder={`Search ${templates.length || ''} templates…`}
+              className={cn(FIELD_CONTROL_CLASS, 'h-8 w-full max-w-60 sm:w-60')}
+            />
+          </div>
+
+          {topTags.length > 0 && (
+            <div className="mb-4 flex flex-wrap gap-1.5">
+              {topTags.map((tag) => (
+                <button
+                  key={tag}
+                  type="button"
+                  onClick={() => setActiveTag(activeTag === tag ? null : tag)}
+                  className={cn(
+                    'rounded-full border px-2.5 py-1 text-[11px] font-medium transition-colors',
+                    activeTag === tag
+                      ? 'border-skill/45 bg-skill/10 text-ink'
+                      : 'border-border bg-secondary text-muted-foreground hover:bg-accent hover:text-foreground',
+                  )}
+                >
+                  {tag}
+                </button>
+              ))}
+            </div>
+          )}
+
+          {templates.length === 0 ? (
+            <p className="py-10 text-center text-xs text-muted-foreground">
+              Loading the template catalog…
+            </p>
+          ) : filteredTemplates.length === 0 ? (
+            <p className="py-10 text-center text-xs text-muted-foreground">
+              No templates match your search.
+            </p>
+          ) : (
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+              {filteredTemplates.map((t) => {
+                const pseudoId = `${TEMPLATE_PLAYBOOK_PREFIX}${t.id}`;
+                const cardStatus: ChatSessionStatus | undefined =
+                  running && activeRun?.playbook.id === pseudoId
+                    ? 'running'
+                    : latestRunByPlaybook.get(pseudoId)?.status;
+                return (
+                  <button
+                    key={t.id}
+                    onClick={() => choose(templateAsPlaybook(t), t)}
+                    className="surface-panel group flex flex-col p-4 text-left transition-colors hover:border-skill/35"
+                  >
+                    <div className="mb-3 flex items-center gap-2.5">
+                      <TemplateLogo template={t} className="size-8 shrink-0" />
+                      <div className="min-w-0 flex-1">
+                        <h3 className="truncate text-[13px] font-semibold tracking-[-0.015em] text-ink">
+                          {t.name}
+                        </h3>
+                        <p className="truncate text-[10px] text-muted-foreground">
+                          {t.version}
+                        </p>
+                      </div>
+                    </div>
+                    <p className="line-clamp-2 text-xs leading-relaxed text-muted-foreground">
+                      {t.description}
+                    </p>
+                    <div className="mt-auto flex items-center gap-1.5 pt-2">
+                      {t.tags.slice(0, 3).map((tag) => (
+                        <span
+                          key={tag}
+                          className="rounded-full bg-secondary px-2 py-0.5 text-[10px] text-muted-foreground"
+                        >
+                          {tag}
+                        </span>
+                      ))}
+                      {cardStatus && (
+                        <span className="ml-auto">
+                          <SessionStatusChip status={cardStatus} />
+                        </span>
+                      )}
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          )}
         </div>
       </div>
     );
@@ -455,14 +658,21 @@ export function WizardsView() {
           variant="ghost"
           size="icon-sm"
           className="shrink-0 text-muted-foreground hover:text-foreground"
-          onClick={() => setSelected(null)}
+          onClick={() => {
+            setSelected(null);
+            setSelectedTemplate(null);
+          }}
           aria-label="Back to wizards"
         >
           <ArrowLeftIcon className="size-4" />
         </Button>
-        <span className="skill-chip flex size-6 shrink-0 items-center justify-center rounded-full">
-          <SidebarGlyph icon={playbookGlyph(selected.id)} variant="chrome" />
-        </span>
+        {selectedTemplate ? (
+          <TemplateLogo template={selectedTemplate} className="size-6 shrink-0" />
+        ) : (
+          <span className="skill-chip flex size-6 shrink-0 items-center justify-center rounded-full">
+            <SidebarGlyph icon={playbookGlyph(selected.id)} variant="chrome" />
+          </span>
+        )}
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
             <h1 className="truncate text-sm font-semibold tracking-[-0.015em] text-ink">
@@ -532,6 +742,57 @@ export function WizardsView() {
                   }
                 />
               ))}
+
+              {selectedTemplate && (
+                <div className="space-y-3 p-4">
+                  <div className="flex items-center justify-between">
+                    <Label className={FIELD_LABEL_CLASS}>Template</Label>
+                    <span className="text-[10px] text-muted-foreground">
+                      {selectedTemplate.version}
+                    </span>
+                  </div>
+                  {selectedTemplate.tags.length > 0 && (
+                    <div className="flex flex-wrap gap-1.5">
+                      {selectedTemplate.tags.map((tag) => (
+                        <span
+                          key={tag}
+                          className="rounded-full bg-secondary px-2 py-0.5 text-[10px] text-muted-foreground"
+                        >
+                          {tag}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                  <p className="text-[11px] leading-relaxed text-muted-foreground">
+                    No configuration needed — passwords and hostnames are
+                    generated automatically. The agent installs Docker if
+                    missing, deploys with Docker Compose, and reports the URL
+                    and credentials when done.
+                  </p>
+                  <div className="flex flex-wrap gap-3">
+                    {(
+                      [
+                        ['GitHub', selectedTemplate.links.github],
+                        ['Website', selectedTemplate.links.website],
+                        ['Docs', selectedTemplate.links.docs],
+                      ] as const
+                    ).map(
+                      ([label, href]) =>
+                        href && (
+                          <a
+                            key={label}
+                            href={href}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="text-[11px] font-medium text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+                          >
+                            {label}
+                          </a>
+                        ),
+                    )}
+                  </div>
+                </div>
+              )}
             </div>
           </div>
 

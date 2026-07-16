@@ -23,6 +23,7 @@ import {
   ServerProfile,
   ServerSecret,
   ServerWithStatus,
+  TemplateMeta,
 } from '../shared/ipc-types';
 import * as store from './store';
 import * as secrets from './secrets';
@@ -66,6 +67,13 @@ import {
   playbookMeta,
 } from '../agent/playbooks';
 import { consumePendingKey, peekPendingKey, generateKeyPair } from './keygen';
+import {
+  buildTemplatePrompt,
+  fetchTemplateFiles,
+  generateHash,
+  listTemplates,
+  processTemplate,
+} from './templates';
 
 let runCounter = 0;
 let sessionCounter = 0;
@@ -724,6 +732,44 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
           externalHostTarget = { serverId, engine: target.engine, port };
         }
       }
+    } else if (arg.templateId) {
+      // App template deploy: fetch the blueprint, expand its variables
+      // (secrets, sslip.io domains) against the target server, and seed the
+      // run with one self-contained deploy prompt.
+      const serverId = arg.serverIds?.[0];
+      const server = serverId ? store.getServer(serverId) : undefined;
+      const serverName = server?.name ?? serverId ?? 'the target server';
+      // sslip.io domains only make sense for a raw IP; for a hostname the
+      // generated name is just a label the agent treats as a suggestion.
+      const serverIp =
+        server && /^[0-9a-fA-F.:]+$/.test(server.host) ? server.host : '';
+      const files = await fetchTemplateFiles(arg.templateId);
+      const catalog = await listTemplates().catch((): TemplateMeta[] => []);
+      const meta = catalog.find((t) => t.id === arg.templateId) ?? {
+        id: arg.templateId,
+        name: arg.templateId,
+        version: 'latest',
+        description: '',
+        links: {},
+        tags: [],
+      };
+      const appName = `${arg.templateId}-${generateHash(6)}`;
+      const processed = processTemplate(files.config, {
+        serverIp,
+        projectName: arg.templateId,
+      });
+      messages = [
+        {
+          role: 'user',
+          content: buildTemplatePrompt({
+            meta,
+            files,
+            processed,
+            appName,
+            serverName,
+          }),
+        },
+      ];
     }
 
     // GitHub App tokens rotate every 8 h — make sure the servers this run will
@@ -920,6 +966,10 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
   // --- playbooks -----------------------------------------------------------
 
   ipcMain.handle(IPC.playbooksList, () => playbookMeta());
+
+  // --- app templates (open-source app gallery) ------------------------------
+
+  ipcMain.handle(IPC.templatesList, () => listTemplates());
 
   // --- live log streaming (Deploys + Artifacts tabs) -------------------------
   // Long-lived follow channels. Output arrives as IPC.evtLogData events keyed
