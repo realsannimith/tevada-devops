@@ -25,6 +25,7 @@ import {
   Project,
   ServerAlertConfig,
   ServerProfile,
+  TunnelConfig,
 } from '../shared/ipc-types';
 
 /** Legacy (pre-sessions) persisted shape — kept only so `read()` can migrate it. */
@@ -51,6 +52,8 @@ type StoreData = {
   googleDrive?: GoogleDriveAccount;
   /** Telegram alerting config (the bot token itself is in secrets.ts). */
   alerts?: AlertConfig;
+  /** Saved SSH tunnel configs (whether one is running is runtime-only state). */
+  tunnels?: TunnelConfig[];
 };
 
 const EMPTY: StoreData = {
@@ -113,6 +116,17 @@ function parseStore(raw: string): StoreData {
     codex: parsed.codex,
     googleDrive: parsed.googleDrive,
     alerts: parsed.alerts ? normalizeAlertConfig(parsed.alerts) : undefined,
+    tunnels: Array.isArray(parsed.tunnels)
+      ? parsed.tunnels.filter(
+          (t): t is TunnelConfig =>
+            !!t &&
+            typeof t.id === 'string' &&
+            typeof t.serverId === 'string' &&
+            Number.isInteger(t.localPort) &&
+            typeof t.remoteHost === 'string' &&
+            Number.isInteger(t.remotePort),
+        )
+      : undefined,
   };
 }
 
@@ -873,6 +887,39 @@ export function setServerAlertConfig(sc: ServerAlertConfig): AlertConfig {
   data.alerts = current;
   write(data);
   return data.alerts;
+}
+
+// --- ssh tunnels --------------------------------------------------------------
+
+export function listTunnels(): TunnelConfig[] {
+  return read().tunnels ?? [];
+}
+
+/** Upsert by id. */
+export function saveTunnel(config: TunnelConfig): TunnelConfig {
+  const data = read();
+  const tunnels = data.tunnels ?? [];
+  const idx = tunnels.findIndex((t) => t.id === config.id);
+  if (idx === -1) tunnels.push(config);
+  else tunnels[idx] = config;
+  data.tunnels = tunnels;
+  write(data);
+  return config;
+}
+
+export function removeTunnel(id: string): void {
+  const data = read();
+  if (!data.tunnels) return;
+  data.tunnels = data.tunnels.filter((t) => t.id !== id);
+  write(data);
+}
+
+/** Drop every tunnel of a server (called when the server itself is removed). */
+export function removeTunnelsForServer(serverId: string): void {
+  const data = read();
+  if (!data.tunnels) return;
+  data.tunnels = data.tunnels.filter((t) => t.serverId !== serverId);
+  write(data);
 }
 
 /** Drop a server's alert config (called when the server itself is removed). */

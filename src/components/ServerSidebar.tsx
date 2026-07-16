@@ -30,6 +30,7 @@ import { BrailleSpinner } from "@/components/chat/RunningStatus";
 import { ThemeToggleButton } from "@/components/ThemeToggle";
 import { useServers } from "@/hooks/useServers";
 import { useProjects } from "@/hooks/useProjects";
+import { useDeployWatch } from "@/hooks/useDeployWatch";
 import {
   CHAT_HISTORY_UPDATED_EVENT,
   CHAT_NEW_SESSION_EVENT,
@@ -105,6 +106,7 @@ export function ServerSidebar({
   const { servers, statusOf, connect, disconnect, remove, refresh } =
     useServers();
   const { projects, remove: removeProject } = useProjects();
+  const { deployingServerIds } = useDeployWatch();
   const [sessions, setSessions] = useState<ChatHistorySummary[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   // Wizard run last opened from History (the store's active pointer is chat-only).
@@ -204,6 +206,20 @@ export function ServerSidebar({
         >
           {s.name}
         </button>
+        {/* Ambient auto-deploy signal: a cron deploy on this server is running
+            right now. Visible from anywhere, click to jump to the Deploys tab. */}
+        {deployingServerIds.has(s.id) && (
+          <button
+            onClick={() =>
+              onNavigate({ kind: "server", serverId: s.id, tab: "deploys" })
+            }
+            title="A deploy is in progress — open the Deploys tab"
+            className="flex shrink-0 items-center gap-1 rounded-full bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary"
+          >
+            <Loader2Icon className="size-2.5 animate-spin" aria-hidden />
+            deploying
+          </button>
+        )}
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <button className="rounded-sm p-0.5 text-muted-foreground/60 opacity-0 transition-opacity hover:bg-accent hover:text-foreground group-hover:opacity-100 data-[state=open]:opacity-100">

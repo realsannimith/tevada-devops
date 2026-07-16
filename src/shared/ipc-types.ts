@@ -93,6 +93,9 @@ export type AppSettings = {
   mcpEnabled: boolean;
   /** Localhost port the MCP server listens on. */
   mcpPort: number;
+  /** When true, the MCP server exposes only read/observe tools — no
+   *  run_command / run_script / write_file / setup_deploy_notifications. */
+  mcpReadOnly: boolean;
 };
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -107,6 +110,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   aiThinking: true,
   mcpEnabled: false,
   mcpPort: 7423,
+  mcpReadOnly: false,
 };
 
 /**
@@ -206,6 +210,44 @@ export type ArtifactLogsRequest = {
 export type ArtifactLogsResult =
   | { ok: true; content: string }
   | { ok: false; error: string };
+
+// ---------------------------------------------------------------------------
+// Live log streaming — the realtime backing for the Deploys + Artifacts tabs.
+//
+// The one-shot `deploys:log` / `artifacts:logs` reads above still exist (the
+// agent uses them), but the UI follows a long-lived stream instead: main opens
+// a dedicated SSH exec channel running `tail -f` / `docker logs -f` /
+// `journalctl -f` and pushes chunks to the renderer as they arrive. A build's
+// output shows up as the builder prints it, not up to 4s later.
+//
+// Transport-agnostic on purpose: the payload is {streamId, chunk}, so a cloud
+// server can later feed the same renderer over the cloud bridge instead of a
+// local SSH channel without the UI changing.
+// ---------------------------------------------------------------------------
+
+/** What to follow. Each variant maps to exactly one safe remote command. */
+export type LogStreamSource =
+  /** A deploy script's build log (path comes from the deploy registry). */
+  | { kind: 'deploy'; logPath: string }
+  /** A docker container or a systemd unit, as listed in the Artifacts tab. */
+  | { kind: 'artifact'; runtime: ArtifactRuntime; name: string };
+
+export type LogStreamRequest = {
+  serverId: string;
+  source: LogStreamSource;
+  /** Lines of history to replay before following. Default 500, max 5000. */
+  tail?: number;
+};
+
+export type LogStreamOpenResult =
+  | { ok: true; streamId: string }
+  | { ok: false; error: string };
+
+/** A batch of raw output (may split mid-line; the renderer re-joins). */
+export type LogDataEvent = { streamId: string; chunk: string };
+
+/** The follow command ended — remote process exited, or the SSH link dropped. */
+export type LogExitEvent = { streamId: string; error?: string };
 
 // ---------------------------------------------------------------------------
 // Database credentials — saved by the "Set up a database" wizard (and the
@@ -844,11 +886,71 @@ export type EnvFileReadResult =
   | { ok: false; error: string };
 
 // ---------------------------------------------------------------------------
+// SSH tunnels (local port forwards)
+//
+// A tunnel listens on 127.0.0.1:<localPort> on THIS machine and forwards every
+// TCP connection through the server's SSH connection to <remoteHost>:<remotePort>
+// as seen FROM the server (127.0.0.1 = a service bound to localhost on the box).
+// The classic use: reach a local-only database with a desktop GUI without ever
+// exposing its port to the internet. Configs persist in easyhost.json; whether
+// a tunnel is running is runtime state and always starts false on launch.
+// ---------------------------------------------------------------------------
+
+export type TunnelConfig = {
+  id: string;
+  serverId: string;
+  /** Optional label, e.g. "Postgres" — defaults to host:port in the UI. */
+  name?: string;
+  /** Local listen port on 127.0.0.1. */
+  localPort: number;
+  /** Destination host as resolved FROM the server. Normally 127.0.0.1. */
+  remoteHost: string;
+  remotePort: number;
+  createdAt: number;
+};
+
+/** Runtime state of one tunnel, pushed to the renderer on every change. */
+export type TunnelState = {
+  config: TunnelConfig;
+  active: boolean;
+  /** Forwarded TCP connections currently open. */
+  connections: number;
+  /** Last listener/forward error (port in use, SSH down, …). */
+  error?: string;
+};
+
+// ---------------------------------------------------------------------------
 // Telegram alerting
 // ---------------------------------------------------------------------------
 
-/** Which signal a rule watches. `reachability` is driven by SSH connectivity. */
-export type AlertMetric = 'reachability' | 'cpu' | 'memory' | 'disk' | 'load';
+/** Which signal a rule watches. `reachability` is driven by SSH connectivity;
+ *  `http` and `tls` by the URL uptime checks (see HttpCheckConfig). */
+export type AlertMetric =
+  | 'reachability'
+  | 'cpu'
+  | 'memory'
+  | 'disk'
+  | 'load'
+  | 'http'
+  | 'tls';
+
+/**
+ * One HTTP uptime check — a Gatus-style URL probe evaluated on the same
+ * 15s tick and anti-flap state machine as the server rules, delivered over
+ * the same Telegram channel. For events, `AlertEvent.serverId` carries the
+ * check id and `serverName` the URL's host.
+ */
+export type HttpCheckConfig = {
+  id: string;
+  /** Full URL to probe (http:// or https://). Healthy = status < 400. */
+  url: string;
+  enabled: boolean;
+  /** Also alert when the TLS certificate expires within this many days
+   *  (https URLs only). null = TLS expiry check off. */
+  tlsExpiryDays: number | null;
+};
+
+export const DEFAULT_TLS_EXPIRY_DAYS = 14;
 
 /**
  * Per-server thresholds. `null` disables that rule. cpu/memory/disk are percent
@@ -893,6 +995,9 @@ export type AlertConfig = {
   /** Re-remind interval while an incident is ongoing, in minutes (0 = never). */
   reminderMinutes: number;
   servers: ServerAlertConfig[];
+  /** URL uptime checks. Absent on configs saved before the feature existed —
+   *  read as `?? []`. */
+  httpChecks?: HttpCheckConfig[];
 };
 
 export const DEFAULT_ALERT_CONFIG: AlertConfig = {
@@ -901,6 +1006,7 @@ export const DEFAULT_ALERT_CONFIG: AlertConfig = {
   successThreshold: 2,
   reminderMinutes: 30,
   servers: [],
+  httpChecks: [],
 };
 
 /** Alerting state surfaced to the renderer (no token material). */
@@ -968,6 +1074,9 @@ export const IPC = {
   sftpWrite: 'sftp:write',
   sftpDownload: 'sftp:download',
   sftpUpload: 'sftp:upload',
+  // live log streaming (invoke) — Deploys + Artifacts tabs
+  logsOpen: 'logs:open',
+  logsClose: 'logs:close',
   // monitor (invoke)
   monitorStart: 'monitor:start',
   monitorStop: 'monitor:stop',
@@ -1046,6 +1155,12 @@ export const IPC = {
   alertsTest: 'alerts:test',
   alertsSetConfig: 'alerts:set-config',
   alertsSetServer: 'alerts:set-server',
+  // ssh tunnels (invoke) — local port forwards over the managed SSH connections
+  tunnelsList: 'tunnels:list',
+  tunnelsSave: 'tunnels:save',
+  tunnelsRemove: 'tunnels:remove',
+  tunnelsStart: 'tunnels:start',
+  tunnelsStop: 'tunnels:stop',
   // local MCP server (invoke) — lets external coding agents (Claude Code,
   // Codex, …) operate on the user's servers through this app
   mcpStatus: 'mcp:status',
@@ -1062,6 +1177,8 @@ export const IPC = {
   evtSshStatus: 'ssh:status',
   evtTermData: 'term:data',
   evtTermExit: 'term:exit',
+  evtLogData: 'logs:data',
+  evtLogExit: 'logs:exit',
   evtMonitorStats: 'monitor:stats',
   evtAgentEvent: 'agent:event',
   evtGithubAuth: 'github:auth-event',
@@ -1070,6 +1187,7 @@ export const IPC = {
   evtCodexAuth: 'codex:auth-event',
   evtChatHistory: 'chat-history:changed',
   evtAlert: 'alerts:event',
+  evtTunnelState: 'tunnels:state-changed',
   evtMcpStatus: 'mcp:status-changed',
   evtUpdateState: 'update:state-changed',
 } as const;
@@ -1113,6 +1231,10 @@ export type McpStatus = {
   port: number;
   /** Full endpoint URL while running (e.g. http://127.0.0.1:7423/mcp). */
   url: string | null;
+  /** The bearer token every request to the endpoint must present. Shown in
+   *  Settings so the user can configure clients the one-click installers
+   *  don't cover. Localhost-only credential — it never grants remote access. */
+  token: string | null;
   /** Last start error, if the server failed to come up (e.g. port in use). */
   error?: string;
 };

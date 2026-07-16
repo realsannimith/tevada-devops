@@ -3,6 +3,7 @@
  * manager, monitor and agent together. Called once after app.whenReady().
  */
 import { BrowserWindow, dialog, ipcMain } from 'electron';
+import { randomBytes } from 'node:crypto';
 import { basename } from 'node:path';
 import {
   AgentEvent,
@@ -14,6 +15,7 @@ import {
   ArtifactLogsRequest,
   ChatSession,
   IPC,
+  LogStreamRequest,
   Project,
   SteerItem,
   SaveDatabaseCredentialRequest,
@@ -30,6 +32,8 @@ import * as googleDriveSync from './googleDriveSync';
 import * as alerts from './alerts';
 import { AlertEngine } from './alerts';
 import * as deployments from './deployments';
+import { startLogStream } from './logStream';
+import { TunnelManager, validateTunnelInput } from './tunnels';
 import { ConnectionManager, posixJoin } from './connection-manager';
 import * as knownHosts from './knownHosts';
 import { Monitor } from './monitor';
@@ -97,6 +101,8 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
     onShellData: (sessionId, data) =>
       send(IPC.evtTermData, { sessionId, data }),
     onShellExit: (sessionId) => send(IPC.evtTermExit, { sessionId }),
+    onLogData: (streamId, chunk) => send(IPC.evtLogData, { streamId, chunk }),
+    onLogExit: (streamId, error) => send(IPC.evtLogExit, { streamId, error }),
   });
 
   const monitor = new Monitor(cm, (serverId, stats) =>
@@ -148,6 +154,14 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
     }
     return result;
   };
+
+  // SSH tunnels: local listeners forwarding through the managed connections.
+  const tunnels = new TunnelManager({
+    cm,
+    connect: connectServer,
+    listConfigs: () => store.listTunnels(),
+    emit: (states) => send(IPC.evtTunnelState, states),
+  });
 
   // Let github.ts re-push rotated GitHub App tokens to authorized servers in
   // the background (it never owns SSH connections itself).
@@ -208,6 +222,8 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
     // Forget the pinned host key too, so re-adding a rebuilt server at the same
     // address trusts its new key on first connect instead of hard-failing.
     const removed = store.getServer(arg.serverId);
+    tunnels.stopForServer(arg.serverId);
+    store.removeTunnelsForServer(arg.serverId);
     cm.disconnect(arg.serverId);
     monitor.stop(arg.serverId);
     secrets.deleteSecret(arg.serverId);
@@ -905,6 +921,79 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
 
   ipcMain.handle(IPC.playbooksList, () => playbookMeta());
 
+  // --- live log streaming (Deploys + Artifacts tabs) -------------------------
+  // Long-lived follow channels. Output arrives as IPC.evtLogData events keyed
+  // by streamId; the renderer closes the stream when its panel unmounts.
+
+  ipcMain.handle(IPC.logsOpen, (_e, arg: LogStreamRequest) =>
+    startLogStream(cm, arg),
+  );
+  ipcMain.handle(
+    IPC.logsClose,
+    (_e, arg: { serverId: string; streamId: string }) => {
+      cm.closeLogStream(arg.serverId, arg.streamId);
+    },
+  );
+
+  // --- ssh tunnels (Tunnels tab) ---------------------------------------------
+  // Saved configs live in the store; the TunnelManager owns the local listeners
+  // and pushes the full state list on every change (IPC.evtTunnelState).
+
+  ipcMain.handle(IPC.tunnelsList, () => tunnels.states());
+
+  ipcMain.handle(
+    IPC.tunnelsSave,
+    (
+      _e,
+      arg: {
+        id?: string;
+        serverId: string;
+        name?: string;
+        localPort: number;
+        remoteHost: string;
+        remotePort: number;
+      },
+    ) => {
+      const invalid = validateTunnelInput(arg);
+      if (invalid) return { ok: false as const, error: invalid };
+      if (!store.getServer(arg.serverId)) {
+        return { ok: false as const, error: 'Unknown server.' };
+      }
+      const existing = arg.id
+        ? store.listTunnels().find((t) => t.id === arg.id)
+        : undefined;
+      store.saveTunnel({
+        id: arg.id ?? `tun_${Date.now()}_${runCounter++}`,
+        serverId: arg.serverId,
+        name: arg.name?.trim() || undefined,
+        localPort: arg.localPort,
+        remoteHost: arg.remoteHost.trim(),
+        remotePort: arg.remotePort,
+        createdAt: existing?.createdAt ?? Date.now(),
+      });
+      // Editing a running tunnel restarts it against the new destination.
+      if (existing && arg.id) tunnels.stop(arg.id);
+      send(IPC.evtTunnelState, tunnels.states());
+      return { ok: true as const };
+    },
+  );
+
+  ipcMain.handle(IPC.tunnelsRemove, (_e, arg: { id: string }) => {
+    tunnels.stop(arg.id);
+    store.removeTunnel(arg.id);
+    send(IPC.evtTunnelState, tunnels.states());
+    return { ok: true };
+  });
+
+  ipcMain.handle(IPC.tunnelsStart, (_e, arg: { id: string }) =>
+    tunnels.start(arg.id),
+  );
+
+  ipcMain.handle(IPC.tunnelsStop, (_e, arg: { id: string }) => {
+    tunnels.stop(arg.id);
+    return { ok: true };
+  });
+
   // --- artifacts -----------------------------------------------------------
 
   ipcMain.handle(IPC.artifactsScan, (_e, arg: { serverId: string }) =>
@@ -1101,6 +1190,28 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
   // through this app: the endpoint reuses the same store + connection manager
   // the in-app agent uses, and credentials never leave the main process.
 
+  // Per-install bearer token, generated once and kept in the encrypted secret
+  // store. If secure storage is unavailable the token lives only in memory for
+  // this app run (configs written by one-click install would go stale on
+  // restart — same environments where the app can't save SSH secrets anyway).
+  const MCP_TOKEN_SECRET_ID = 'mcp-auth-token';
+  let mcpMemoryToken: string | null = null;
+  const mcpAuthToken = (): string | null => {
+    const stored = secrets.hasRawSecret(MCP_TOKEN_SECRET_ID)
+      ? secrets.loadRawSecret(MCP_TOKEN_SECRET_ID)
+      : undefined;
+    if (stored) return stored;
+    if (!mcpMemoryToken) {
+      mcpMemoryToken = randomBytes(24).toString('base64url');
+      try {
+        secrets.saveRawSecret(MCP_TOKEN_SECRET_ID, mcpMemoryToken);
+      } catch (err) {
+        console.warn('[mcp] auth token not persisted (secure storage unavailable)', err);
+      }
+    }
+    return mcpMemoryToken;
+  };
+
   const mcp = new TevadaMcpServer(
     {
       listServers: () => store.listServers(),
@@ -1112,6 +1223,33 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
       listSkills: loadSkills,
       sftpWriteFile: (serverId, path, content) =>
         cm.sftpWriteFile(serverId, path, content),
+      sftpReadFile: (serverId, path, maxBytes) =>
+        cm.sftpReadFile(serverId, path, maxBytes),
+      sftpList: (serverId, path) => cm.sftpList(serverId, path),
+      scanArtifacts: (serverId) => scanArtifacts(cm, serverId),
+      listDeployments: (serverId) => deployments.listDeployments(cm, serverId),
+      readDeployLog: (serverId, logPath) =>
+        deployments.readDeployLog(cm, serverId, logPath),
+      getAlertsInfo: () => {
+        const config = store.getAlertConfig();
+        return {
+          configured: !!alerts.loadToken() && !!config.chatId,
+          // http/tls incidents key on the check id — swap in the URL so the
+          // MCP get_alerts tool (which resolves names via the server list)
+          // falls back to something meaningful.
+          incidents: alertEngine.snapshot().map((i) =>
+            i.metric === 'http' || i.metric === 'tls'
+              ? {
+                  ...i,
+                  serverId:
+                    (config.httpChecks ?? []).find((c) => c.id === i.serverId)
+                      ?.url ?? i.serverId,
+                }
+              : i,
+          ),
+        };
+      },
+      isReadOnly: () => store.getSettings().mcpReadOnly,
       listGithubRepos: () => github.listRepos(),
       githubAuthorizedServerIds: () =>
         store.getGithubAccount()?.authorizedServerIds ?? [],
@@ -1127,6 +1265,7 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
         );
       },
     },
+    mcpAuthToken,
     (status) => send(IPC.evtMcpStatus, status),
   );
 
@@ -1137,8 +1276,8 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
         ? arg.port
         : store.getSettings().mcpPort;
     const status = await mcp.start(port);
-    // Persist intent only when the server actually came up, so a bad port
-    // doesn't get remembered as "auto-start this".
+    // Record last-run state and the working port (the server never auto-starts
+    // — this is just so the UI and port field reflect the last session).
     store.setSettings({ mcpEnabled: status.running, mcpPort: port });
     return status;
   });
@@ -1151,7 +1290,14 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
     (_e, arg: { client: McpInstallClient }) => {
       const { url } = mcp.status();
       const target = url ?? `http://127.0.0.1:${store.getSettings().mcpPort}/mcp`;
-      return installMcpClient(arg.client, target);
+      const token = mcpAuthToken();
+      if (!token) {
+        return {
+          ok: false as const,
+          error: 'No auth token available — OS secure storage is unavailable.',
+        };
+      }
+      return installMcpClient(arg.client, target, token);
     },
   );
 
@@ -1164,10 +1310,9 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
   ipcMain.handle(IPC.updateInstall, () => updater.downloadAndInstall());
   ipcMain.handle(IPC.updateOpenReleases, () => updater.openReleasesPage());
 
-  // Auto-start if the user left it enabled last session.
-  if (store.getSettings().mcpEnabled) {
-    void mcp.start(store.getSettings().mcpPort);
-  }
+  // The MCP server never auto-starts: it exposes the user's servers to coding
+  // agents, so bringing it up is an explicit, deliberate action every session.
+  // The user runs it from Settings → Agent Access with the Run button.
 
   // --- lifecycle cleanup ---------------------------------------------------
 
@@ -1186,6 +1331,7 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
     });
     win.on('closed', () => {
       cancelAllRuns();
+      tunnels.stopAll();
       monitor.stopAll();
       stopGoogleDriveAutoSync();
       stopGoogleDriveStatus();

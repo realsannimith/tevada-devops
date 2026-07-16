@@ -26,6 +26,10 @@ import {
   DatabaseCredential,
   DatabaseCredentialMeta,
   DeployLogResult,
+  LogDataEvent,
+  LogExitEvent,
+  LogStreamOpenResult,
+  LogStreamRequest,
   DeploymentsResult,
   EnvFileReadResult,
   OkResult,
@@ -58,6 +62,7 @@ import {
   SftpReadResult,
   SftpTransferResult,
   SshStatusEvent,
+  TunnelState,
   SteerItem,
   TelegramChatDetectResult,
   TelegramConnectResult,
@@ -266,6 +271,40 @@ const easyhost = {
       ipcRenderer.invoke(IPC.artifactsAction, req),
     logs: (req: ArtifactLogsRequest): Promise<ArtifactLogsResult> =>
       ipcRenderer.invoke(IPC.artifactsLogs, req),
+  },
+
+  // Live log follow. open() resolves with a streamId; every chunk for that
+  // stream then arrives on onData until close() or onExit. Used by both the
+  // Deploys tab (build logs) and the Artifacts tab (container/unit logs).
+  logs: {
+    open: (req: LogStreamRequest): Promise<LogStreamOpenResult> =>
+      ipcRenderer.invoke(IPC.logsOpen, req),
+    close: (serverId: string, streamId: string): Promise<void> =>
+      ipcRenderer.invoke(IPC.logsClose, { serverId, streamId }),
+    onData: (cb: (e: LogDataEvent) => void) => on<LogDataEvent>(IPC.evtLogData, cb),
+    onExit: (cb: (e: LogExitEvent) => void) => on<LogExitEvent>(IPC.evtLogExit, cb),
+  },
+
+  // SSH tunnels (local port forwards). save() upserts a config; start()/stop()
+  // control the local listener. Full state pushes arrive on onState.
+  tunnels: {
+    list: (): Promise<TunnelState[]> => ipcRenderer.invoke(IPC.tunnelsList),
+    save: (input: {
+      id?: string;
+      serverId: string;
+      name?: string;
+      localPort: number;
+      remoteHost: string;
+      remotePort: number;
+    }): Promise<OkResult> => ipcRenderer.invoke(IPC.tunnelsSave, input),
+    remove: (id: string): Promise<{ ok: boolean }> =>
+      ipcRenderer.invoke(IPC.tunnelsRemove, { id }),
+    start: (id: string): Promise<{ ok: boolean; error?: string }> =>
+      ipcRenderer.invoke(IPC.tunnelsStart, { id }),
+    stop: (id: string): Promise<{ ok: boolean }> =>
+      ipcRenderer.invoke(IPC.tunnelsStop, { id }),
+    onState: (cb: (states: TunnelState[]) => void) =>
+      on<TunnelState[]>(IPC.evtTunnelState, cb),
   },
 
   deploys: {

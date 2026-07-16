@@ -4,16 +4,16 @@
  * databases, services and cron backups; this view groups them with the same
  * brand glyphs the wizards use so a Postgres container reads as Postgres.
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import type { View } from '@/App';
 import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
 import {
   DatabaseCredentialDialog,
   type CredentialDialogTarget,
 } from '@/components/DatabaseCredentialDialog';
 import { EnvFileDialog, type EnvTarget } from '@/components/EnvFileDialog';
+import { LogStreamPanel } from '@/components/LogStreamPanel';
 import { useServers } from '@/hooks/useServers';
 import {
   CHAT_PREFILL_EVENT,
@@ -56,6 +56,7 @@ import type {
   ArtifactStatus,
   DatabaseCredentialMeta,
   DeploymentInfo,
+  LogStreamSource,
   ServerArtifact,
 } from '@/shared/ipc-types';
 
@@ -877,11 +878,9 @@ function ExposureStrip({
 }
 
 // ---------------------------------------------------------------------------
-// Logs panel — tails `docker logs` / `journalctl` while the row is expanded
-// (same searchable self-reloading pattern as the Deploys tab's build log)
+// Logs panel — follows `docker logs -f` / `journalctl -f` live while the row is
+// expanded (same streaming panel as the Deploys tab's build log)
 // ---------------------------------------------------------------------------
-
-const LOG_REFRESH_MS = 4_000;
 
 function ArtifactLogsSection({
   serverId,
@@ -892,103 +891,18 @@ function ArtifactLogsSection({
   runtime: ArtifactRuntime;
   name: string;
 }) {
-  const [log, setLog] = useState<string | null>(null);
-  const [logError, setLogError] = useState<string | null>(null);
-  const [logLoading, setLogLoading] = useState(false);
-  const [query, setQuery] = useState('');
-  const preRef = useRef<HTMLPreElement | null>(null);
-
-  const loadLog = useCallback(
-    async (silent = false) => {
-      if (!silent) setLogLoading(true);
-      try {
-        const res = await window.easyhost.artifacts.logs({
-          serverId,
-          runtime,
-          name,
-        });
-        if (res.ok === false) {
-          setLogError(res.error);
-        } else {
-          setLogError(null);
-          setLog(res.content.trimEnd() || '(no log output)');
-        }
-      } catch {
-        if (!silent) setLogError('Could not read logs.');
-      } finally {
-        if (!silent) setLogLoading(false);
-      }
-    },
-    [serverId, runtime, name],
-  );
-
-  // The panel only exists while its row is expanded, so a tight tail loop is
-  // fine — a restarting container's output reads as near-realtime.
-  useEffect(() => {
-    void loadLog();
-    const t = setInterval(() => void loadLog(true), LOG_REFRESH_MS);
-    return () => clearInterval(t);
-  }, [loadLog]);
-
-  // Follow the tail (like `tail -f`) unless the user is searching.
-  useEffect(() => {
-    if (!query && preRef.current) {
-      preRef.current.scrollTop = preRef.current.scrollHeight;
-    }
-  }, [log, query]);
-
-  const shown = useMemo(() => {
-    if (!log) return log;
-    if (!query.trim()) return log;
-    const q = query.toLowerCase();
-    const lines = log.split('\n').filter((l) => l.toLowerCase().includes(q));
-    return lines.length > 0 ? lines.join('\n') : `(no lines match "${query}")`;
-  }, [log, query]);
-
+  // Rebuilt each render; useLogStream keys off content, not identity.
+  const source: LogStreamSource = { kind: 'artifact', runtime, name };
   return (
-    <div>
-      <div className="mb-1.5 flex items-center justify-between gap-2">
-        <p className="shrink-0 text-[11px] font-medium text-muted-foreground">
-          Logs
-          <span className="ml-2 font-mono text-[10px] font-normal text-muted-foreground/60">
-            {runtime === 'container'
-              ? `docker logs ${name}`
-              : `journalctl -u ${name}`}{' '}
-            · last 200 lines
-          </span>
-        </p>
-        <div className="flex items-center gap-1.5">
-          <Input
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search logs…"
-            spellCheck={false}
-            className="h-6 w-44 text-[11px]"
-          />
-          <Button
-            variant="ghost"
-            size="sm"
-            className="h-6 px-2 text-[11px] text-muted-foreground"
-            onClick={() => void loadLog()}
-            disabled={logLoading}
-          >
-            {logLoading && <Loader2Icon className="size-3 animate-spin" />}
-            Reload
-          </Button>
-        </div>
-      </div>
-      {logError ? (
-        <p className="text-[11px] text-destructive">{logError}</p>
-      ) : log === null ? (
-        <p className="text-[11px] text-muted-foreground">Loading…</p>
-      ) : (
-        <pre
-          ref={preRef}
-          className="max-h-72 overflow-auto rounded-lg border border-border bg-background p-3 font-mono text-[11px] leading-relaxed text-muted-foreground"
-        >
-          {shown}
-        </pre>
-      )}
-    </div>
+    <LogStreamPanel
+      serverId={serverId}
+      source={source}
+      title="Logs"
+      subtitle={
+        runtime === 'container'
+          ? `docker logs ${name}`
+          : `journalctl -u ${name}`
+      }
+    />
   );
 }

@@ -58,6 +58,9 @@ type Managed = {
   client: Client;
   status: ConnStatus;
   shells: Map<string, ClientChannel>;
+  /** Long-lived follow commands (`tail -f`, `docker logs -f`), keyed by
+   *  streamId. Deliberately separate from `shells` and from `execQueue`. */
+  logStreams: Map<string, ClientChannel>;
   sftp?: SFTPWrapper;
   execQueue: Promise<unknown>;
 };
@@ -78,6 +81,8 @@ type Listeners = {
   onStatus: (serverId: string, status: ConnStatus, error?: string) => void;
   onShellData: (sessionId: string, data: string) => void;
   onShellExit: (sessionId: string) => void;
+  onLogData: (streamId: string, chunk: string) => void;
+  onLogExit: (streamId: string, error?: string) => void;
 };
 
 const DEFAULT_EXEC_TIMEOUT = 60_000;
@@ -254,6 +259,7 @@ export class ConnectionManager {
         client,
         status: 'connecting',
         shells: new Map(),
+        logStreams: new Map(),
         execQueue: Promise.resolve(),
       };
       this.conns.set(profile.id, managed);
@@ -289,6 +295,21 @@ export class ConnectionManager {
             this.listeners.onShellExit(sid);
           }
           managed.shells.clear();
+          // Same for log follows — tell the renderer so it can stop showing a
+          // "Live" badge for a stream that can no longer receive anything.
+          // Drop each entry BEFORE closing it: ch.close() re-enters the
+          // channel's own close handler, which would otherwise see the stream
+          // still registered and emit a second, error-less exit.
+          for (const [streamId, ch] of [...managed.logStreams]) {
+            managed.logStreams.delete(streamId);
+            try {
+              ch.close();
+            } catch {
+              /* noop */
+            }
+            this.listeners.onLogExit(streamId, 'The SSH connection closed.');
+          }
+          managed.logStreams.clear();
           managed.sftp = undefined;
           if (managed.status !== 'error') {
             this.setStatus(profile.id, 'disconnected');
@@ -475,6 +496,28 @@ export class ConnectionManager {
     });
   }
 
+  // --- port forwarding (Tunnels tab) ----------------------------------------
+
+  /**
+   * Open one forwarded TCP channel to `dstHost:dstPort` as resolved from the
+   * server. The caller (main/tunnels.ts) owns the local listener and pipes each
+   * accepted socket through the channel this returns. Not serialized through
+   * `execQueue`: forwarded channels are long-lived, and OpenSSH counts them
+   * against MaxSessions separately from exec sessions.
+   */
+  forwardOut(
+    serverId: string,
+    dstHost: string,
+    dstPort: number,
+  ): Promise<ClientChannel> {
+    const m = this.requireConnected(serverId);
+    return new Promise((resolve, reject) => {
+      m.client.forwardOut('127.0.0.1', 0, dstHost, dstPort, (err, channel) =>
+        err ? reject(err) : resolve(channel),
+      );
+    });
+  }
+
   // --- interactive shell (terminal UI) -------------------------------------
 
   openShell(
@@ -552,6 +595,83 @@ export class ConnectionManager {
       } catch {
         /* noop */
       }
+    }
+  }
+
+  // --- log follow (Deploys + Artifacts tabs) --------------------------------
+
+  /**
+   * Run a long-lived follow command (`tail -f`, `docker logs -f`, `journalctl
+   * -f`) and push its output to the renderer as it arrives.
+   *
+   * Deliberately does NOT go through `exec()`. Execs are serialized per server
+   * via `execQueue` to stay under OpenSSH's MaxSessions, and a follow command
+   * never returns — queueing one would starve the monitor poller, the agent,
+   * and every other exec on that server for as long as the panel stayed open.
+   * Like `openShell`, this opens its own channel and is tracked separately.
+   *
+   * `pty: true` matters for two reasons: `docker logs` only emits ANSI colour
+   * when it believes it has a TTY, and a PTY-backed remote process gets SIGHUP
+   * when the channel drops — without it, closing the panel leaves an orphaned
+   * `tail -f` running on the server forever.
+   *
+   * The caller is responsible for building `command` safely; see main/logStream.ts.
+   */
+  openLogStream(
+    serverId: string,
+    streamId: string,
+    command: string,
+  ): Promise<void> {
+    const m = this.requireConnected(serverId);
+    return new Promise((resolve, reject) => {
+      m.client.exec(command, { pty: true }, (err, channel) => {
+        if (err) return reject(err);
+        m.logStreams.set(streamId, channel);
+
+        // Same coalescing as openShell: a build that dumps thousands of lines
+        // in one tick becomes one IPC message, not thousands.
+        let buffer: Buffer[] = [];
+        let scheduled = false;
+        const flush = () => {
+          scheduled = false;
+          if (buffer.length === 0) return;
+          const chunk = Buffer.concat(buffer).toString('utf8');
+          buffer = [];
+          this.listeners.onLogData(streamId, chunk);
+        };
+        const push = (chunk: Buffer) => {
+          buffer.push(chunk);
+          if (!scheduled) {
+            scheduled = true;
+            setImmediate(flush);
+          }
+        };
+
+        channel.on('data', push).on('close', () => {
+          flush();
+          // Only report an exit for a stream we still own. closeLogStream()
+          // deletes the entry first, so a user-initiated close stays silent.
+          if (m.logStreams.delete(streamId)) {
+            this.listeners.onLogExit(streamId);
+          }
+        });
+        // With pty:true the remote merges stderr into the pty, but ssh2 still
+        // exposes the stream — wire it up so nothing is silently dropped.
+        channel.stderr.on('data', push);
+        resolve();
+      });
+    });
+  }
+
+  closeLogStream(serverId: string, streamId: string): void {
+    const m = this.conns.get(serverId);
+    const ch = m?.logStreams.get(streamId);
+    if (!m || !ch) return;
+    m.logStreams.delete(streamId); // before close() — suppresses the exit event
+    try {
+      ch.close();
+    } catch {
+      /* noop */
     }
   }
 

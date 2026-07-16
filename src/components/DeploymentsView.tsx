@@ -7,10 +7,9 @@
  * deploys land within a minute of a push, so the tab should catch them
  * without babysitting.
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { View } from '@/App';
 import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
 import { useServers } from '@/hooks/useServers';
 import { GithubIcon, TelegramIcon } from '@/lib/brand-icons';
 import {
@@ -25,14 +24,18 @@ import {
   type AppIcon,
 } from '@/lib/icons';
 import { cn } from '@/lib/utils';
-import type { DeployEvent, DeploymentInfo } from '@/shared/ipc-types';
+import { LogStreamPanel } from '@/components/LogStreamPanel';
+import type {
+  DeployEvent,
+  DeploymentInfo,
+  LogStreamSource,
+} from '@/shared/ipc-types';
 
 /** Refresh cadence while the tab is open — deploy cron runs at most 1/min. */
 const REFRESH_MS = 20_000;
-/** …but while a deploy is in flight, or a log panel is on screen, tighten the
- *  loop so the user watches it happen (both probes are a cheap tail/cat). */
+/** …but while a deploy is in flight, tighten the loop so the user watches the
+ *  status pills update. The log itself no longer needs this — it streams. */
 const LIVE_REFRESH_MS = 5_000;
-const LOG_REFRESH_MS = 4_000;
 
 /** Status glyph + tinted pill per deploy state — spinner while deploying,
  *  no bare dots anywhere (product decision, Render-badge style). */
@@ -425,97 +428,19 @@ function EventLine({ event, newest }: { event: DeployEvent; newest: boolean }) {
 }
 
 // ---------------------------------------------------------------------------
-// Deploy log — searchable, reloads itself while visible
+// Deploy log — followed live (tail -f over SSH), not polled
 // ---------------------------------------------------------------------------
 
 function LogSection({ serverId, logPath }: { serverId: string; logPath: string }) {
-  const [log, setLog] = useState<string | null>(null);
-  const [logError, setLogError] = useState<string | null>(null);
-  const [logLoading, setLogLoading] = useState(false);
-  const [query, setQuery] = useState('');
-  const preRef = useRef<HTMLPreElement | null>(null);
-
-  const loadLog = useCallback(
-    async (silent = false) => {
-      if (!silent) setLogLoading(true);
-      setLogError(null);
-      try {
-        const res = await window.easyhost.deploys.log(serverId, logPath);
-        if (res.ok === false) setLogError(res.error);
-        else setLog(res.content.trimEnd() || '(log is empty)');
-      } catch {
-        if (!silent) setLogError('Could not read the log.');
-      } finally {
-        if (!silent) setLogLoading(false);
-      }
-    },
-    [serverId, logPath],
-  );
-
-  // The panel only exists while its row is expanded, so a tight tail loop is
-  // fine — this is what makes the log read as realtime during a build.
-  useEffect(() => {
-    void loadLog();
-    const t = setInterval(() => void loadLog(true), LOG_REFRESH_MS);
-    return () => clearInterval(t);
-  }, [loadLog]);
-
-  // Follow the tail (like `tail -f`) unless the user is searching.
-  useEffect(() => {
-    if (!query && preRef.current) {
-      preRef.current.scrollTop = preRef.current.scrollHeight;
-    }
-  }, [log, query]);
-
-  const shown = useMemo(() => {
-    if (!log) return log;
-    if (!query.trim()) return log;
-    const q = query.toLowerCase();
-    const lines = log.split('\n').filter((l) => l.toLowerCase().includes(q));
-    return lines.length > 0 ? lines.join('\n') : `(no lines match "${query}")`;
-  }, [log, query]);
-
+  // Rebuilt on every render, but useLogStream keys off the content, not the
+  // object identity — so this does not churn the SSH channel.
+  const source: LogStreamSource = { kind: 'deploy', logPath };
   return (
-    <div>
-      <div className="mb-1.5 flex items-center justify-between gap-2">
-        <p className="shrink-0 text-[11px] font-medium text-muted-foreground">
-          Deploy log
-          <span className="ml-2 font-mono text-[10px] font-normal text-muted-foreground/60">
-            {logPath}
-          </span>
-        </p>
-        <div className="flex items-center gap-1.5">
-          <Input
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search logs…"
-            spellCheck={false}
-            className="h-6 w-44 text-[11px]"
-          />
-          <Button
-            variant="ghost"
-            size="sm"
-            className="h-6 px-2 text-[11px] text-muted-foreground"
-            onClick={() => void loadLog()}
-            disabled={logLoading}
-          >
-            {logLoading && <Loader2Icon className="size-3 animate-spin" />}
-            Reload
-          </Button>
-        </div>
-      </div>
-      {logError ? (
-        <p className="text-[11px] text-destructive">{logError}</p>
-      ) : log === null ? (
-        <p className="text-[11px] text-muted-foreground">Loading…</p>
-      ) : (
-        <pre
-          ref={preRef}
-          className="max-h-72 overflow-auto rounded-lg border border-border bg-background p-3 font-mono text-[11px] leading-relaxed text-muted-foreground"
-        >
-          {shown}
-        </pre>
-      )}
-    </div>
+    <LogStreamPanel
+      serverId={serverId}
+      source={source}
+      title="Deploy log"
+      subtitle={logPath}
+    />
   );
 }

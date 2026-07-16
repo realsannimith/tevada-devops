@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
+  daysUntil,
   formatDuration,
   freshRuleState,
+  httpCheckLabel,
   renderAlertHtml,
   stepRule,
   type RuleTuning,
@@ -155,6 +157,43 @@ describe('renderAlertHtml', () => {
     const html = renderAlertHtml({ ...base, serverName: 'a<b>&c' });
     expect(html).toContain('a&lt;b&gt;&amp;c');
     expect(html).not.toContain('<b>a<');
+  });
+});
+
+describe('http uptime helpers', () => {
+  it('httpCheckLabel shortens URLs to host (+ non-root path)', () => {
+    expect(httpCheckLabel('https://example.com/')).toBe('example.com');
+    expect(httpCheckLabel('https://example.com')).toBe('example.com');
+    expect(httpCheckLabel('https://api.example.com/health')).toBe(
+      'api.example.com/health',
+    );
+    expect(httpCheckLabel('http://example.com:8080/x')).toBe(
+      'example.com:8080/x',
+    );
+    expect(httpCheckLabel('not a url')).toBe('not a url'); // graceful fallback
+  });
+
+  it('daysUntil floors to whole days and rejects garbage', () => {
+    const now = Date.UTC(2026, 6, 1);
+    expect(daysUntil(new Date(now + 14 * 86_400_000).toUTCString(), now)).toBe(14);
+    expect(daysUntil(new Date(now + 86_400_000 / 2).toUTCString(), now)).toBe(0);
+    expect(daysUntil(new Date(now - 86_400_000).toUTCString(), now)).toBe(-1);
+    expect(daysUntil('never', now)).toBeUndefined();
+  });
+
+  it('renderAlertHtml knows the http and tls metrics', () => {
+    const base: AlertEvent = {
+      serverId: 'hc_1',
+      serverName: 'example.com',
+      metric: 'http',
+      state: 'firing',
+      message: 'https://example.com failed: connect ECONNREFUSED',
+      ts: Date.UTC(2026, 6, 6, 12, 0),
+    };
+    expect(renderAlertHtml(base)).toContain('🔴 <b>Website down</b>');
+    expect(
+      renderAlertHtml({ ...base, metric: 'tls', state: 'resolved' }),
+    ).toContain('✅ <b>TLS certificate renewed</b>');
   });
 });
 

@@ -43,6 +43,8 @@ export function McpSection({
   const running = status?.running ?? false;
   const port = Number(portDraft) || settings.mcpPort;
   const url = status?.url ?? `http://127.0.0.1:${port}/mcp`;
+  const token = status?.token ?? null;
+  const authHeader = token ? `Authorization: Bearer ${token}` : null;
 
   async function toggle(on: boolean) {
     setBusy(true);
@@ -92,12 +94,24 @@ export function McpSection({
             ) : undefined
           }
           control={
-            <Switch
-              checked={running}
-              disabled={busy}
-              onCheckedChange={(v) => void toggle(v)}
-              aria-label="Run MCP server"
-            />
+            running ? (
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={busy}
+                onClick={() => void toggle(false)}
+              >
+                {busy ? 'Stopping…' : 'Stop'}
+              </Button>
+            ) : (
+              <Button
+                size="sm"
+                disabled={busy}
+                onClick={() => void toggle(true)}
+              >
+                {busy ? 'Starting…' : 'Run'}
+              </Button>
+            )
           }
         />
         <SettingsRow
@@ -122,6 +136,25 @@ export function McpSection({
             />
           }
         />
+        <SettingsRow
+          title="Read-only mode"
+          description="Expose only listing and reading tools — connected agents can inspect servers, deploys, and alerts but cannot run commands or write files. Applies immediately."
+          control={
+            <Switch
+              checked={settings.mcpReadOnly}
+              onCheckedChange={(v) => void onPatch({ mcpReadOnly: v })}
+              aria-label="MCP read-only mode"
+            />
+          }
+        />
+        {authHeader ? (
+          <SettingsRow
+            title="Auth token"
+            description="Every request must send this as an Authorization header — it keeps other apps on this machine from driving your servers. The one-click installs below include it automatically."
+          >
+            <Snippet value={authHeader} />
+          </SettingsRow>
+        ) : null}
       </SettingsSection>
 
       <SettingsSection title="Connect your agent (one click)">
@@ -174,21 +207,29 @@ export function McpSection({
           title="Claude Code CLI"
           description="Run this in a terminal instead of the one-click button."
         >
-          <Snippet value={`claude mcp add --transport http tevada-devops ${url}`} />
+          <Snippet
+            value={`claude mcp add --transport http tevada-devops ${url}${authHeader ? ` --header "${authHeader}"` : ''}`}
+          />
         </SettingsRow>
         <SettingsRow
           title="JSON config"
           description="For clients configured with an mcpServers JSON block (Claude Desktop via HTTP, Cursor, Windsurf, …)."
         >
           <Snippet
-            value={`{\n  "mcpServers": {\n    "tevada-devops": {\n      "type": "http",\n      "url": "${url}"\n    }\n  }\n}`}
+            value={`{\n  "mcpServers": {\n    "tevada-devops": {\n      "type": "http",\n      "url": "${url}"${
+              token
+                ? `,\n      "headers": {\n        "Authorization": "Bearer ${token}"\n      }`
+                : ''
+            }\n    }\n  }\n}`}
           />
         </SettingsRow>
         <SettingsRow
           title="Stdio bridge"
           description="For clients that only speak stdio, bridge to the endpoint with mcp-remote."
         >
-          <Snippet value={`npx -y mcp-remote ${url}`} />
+          <Snippet
+            value={`npx -y mcp-remote ${url}${authHeader ? ` --header "${authHeader}"` : ''}`}
+          />
         </SettingsRow>
       </SettingsSection>
 
@@ -198,13 +239,19 @@ export function McpSection({
           description={
             <>
               <span className="block">
-                list_servers · list_projects · run_command · get_server_stats
+                list_servers · list_projects · run_command · run_script ·
+                read_file · write_file · list_directory · get_server_stats ·
+                get_artifacts · list_deploys · get_deploy_log · get_alerts ·
+                list_skills · load_skill · list_github_repos ·
+                setup_deploy_notifications
               </span>
               <span className="mt-1 block">
                 Agents see your server list and can run shell commands on them
                 over this app&apos;s SSH connections — the same access the
-                in-app agent has. Only start the MCP server when the agents on
-                this machine are ones you trust with your servers.
+                in-app agent has (catastrophic commands are always rejected;
+                read-only mode removes command and write tools entirely). Only
+                start the MCP server when the agents on this machine are ones
+                you trust with your servers.
               </span>
             </>
           }

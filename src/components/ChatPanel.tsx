@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import {
   AlertDialog,
   AlertDialogAction,
@@ -120,26 +120,14 @@ export function ChatPanel() {
   const projectRef = useRef(project);
   projectRef.current = project;
 
-  // Servers the target dropdown may pick from: when a project is chosen, only
-  // its members (keeps the composer honest with the agent's hard scope).
-  const scopedServers = useMemo(
-    () =>
-      project === NO_PROJECT
-        ? servers
-        : servers.filter((s) => s.projectIds?.includes(project)),
-    [servers, project],
-  );
-
-  // If the chosen project doesn't include the current target server, fall back
-  // to "All servers" so we never dispatch to an out-of-scope server.
+  // A chat's server scope is fixed by its project. A project chat can only
+  // reach that project's servers (enforced in the main process via
+  // allowedServerIds), so we don't offer a per-server target picker there — it
+  // always runs against every server in the project. Only unscoped ("All
+  // projects") chats show the target dropdown and can aim at one server.
   useEffect(() => {
-    if (
-      target !== ALL &&
-      !scopedServers.some((s) => s.id === target)
-    ) {
-      setTarget(ALL);
-    }
-  }, [scopedServers, target]);
+    if (project !== NO_PROJECT && target !== ALL) setTarget(ALL);
+  }, [project, target]);
 
   // Live run state for the DISPLAYED session only. Runs belong to
   // chatRunManager, not this component: starting a new chat or opening another
@@ -532,29 +520,32 @@ export function ChatPanel() {
             ? 'All projects'
             : (projects.find((p) => p.id === project)?.name ?? 'Project')}
         </span>
-        <Select value={target} onValueChange={setTarget}>
-          <SelectTrigger
-            size="sm"
-            className={COMPOSER_FOOTER_PICKER_TRIGGER_CLASS_NAME}
-            aria-label="Choose target servers"
-          >
-            <ServerIcon
-              aria-hidden
-              className="size-3.5 shrink-0 text-foreground"
-            />
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent side="top">
-            <SelectItem value={ALL}>
-              {project === NO_PROJECT ? 'All servers' : 'All project servers'}
-            </SelectItem>
-            {scopedServers.map((s) => (
-              <SelectItem key={s.id} value={s.id}>
-                {s.name}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
+        {/* Server target picker only for unscoped chats. A project chat is
+            already locked to its project's servers, so it has no picker — it
+            runs against all of them. */}
+        {project === NO_PROJECT && (
+          <Select value={target} onValueChange={setTarget}>
+            <SelectTrigger
+              size="sm"
+              className={COMPOSER_FOOTER_PICKER_TRIGGER_CLASS_NAME}
+              aria-label="Choose target servers"
+            >
+              <ServerIcon
+                aria-hidden
+                className="size-3.5 shrink-0 text-foreground"
+              />
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent side="top">
+              <SelectItem value={ALL}>All servers</SelectItem>
+              {servers.map((s) => (
+                <SelectItem key={s.id} value={s.id}>
+                  {s.name}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        )}
         <ModelOptionsMenu />
       </div>
 

@@ -1,8 +1,9 @@
 /**
- * One-click MCP integration: writes the Tevada DevOps MCP endpoint into the
- * local config of the user's coding agent (Claude Code, Codex) so they don't
- * have to touch a config file. The content transforms are pure functions so
- * they can be unit-tested; only the thin install* wrappers touch the disk.
+ * One-click MCP integration: writes the Tevada DevOps MCP endpoint (URL +
+ * bearer token) into the local config of the user's coding agent (Claude Code,
+ * Codex) so they don't have to touch a config file. The content transforms are
+ * pure functions so they can be unit-tested; only the thin install* wrappers
+ * touch the disk.
  */
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -13,7 +14,11 @@ export const MCP_SERVER_KEY = 'tevada-devops';
 
 /** Upsert our server into Claude Code's user config (~/.claude.json). The file
  *  holds unrelated state, so everything else is preserved verbatim. */
-export function upsertClaudeConfig(content: string | null, url: string): string {
+export function upsertClaudeConfig(
+  content: string | null,
+  url: string,
+  token: string,
+): string {
   let parsed: Record<string, unknown> = {};
   if (content && content.trim()) {
     parsed = JSON.parse(content) as Record<string, unknown>;
@@ -27,19 +32,33 @@ export function upsertClaudeConfig(content: string | null, url: string): string 
     !Array.isArray(parsed.mcpServers)
       ? (parsed.mcpServers as Record<string, unknown>)
       : {};
-  mcpServers[MCP_SERVER_KEY] = { type: 'http', url };
+  mcpServers[MCP_SERVER_KEY] = {
+    type: 'http',
+    url,
+    headers: { Authorization: `Bearer ${token}` },
+  };
   parsed.mcpServers = mcpServers;
   return `${JSON.stringify(parsed, null, 2)}\n`;
 }
 
 /** Upsert our server block into Codex's config (~/.codex/config.toml). If the
  *  block already exists it is replaced in place; otherwise it is appended. */
-export function upsertCodexConfig(content: string | null, url: string): string {
-  const block = `[mcp_servers.${MCP_SERVER_KEY}]\nurl = "${url}"\n`;
+export function upsertCodexConfig(
+  content: string | null,
+  url: string,
+  token: string,
+): string {
+  const block = [
+    `[mcp_servers.${MCP_SERVER_KEY}]`,
+    `url = "${url}"`,
+    `http_headers = { Authorization = "Bearer ${token}" }`,
+    '',
+  ].join('\n');
   const existing = content ?? '';
   const headerPattern = new RegExp(
     // The block runs from our table header to just before the next table
-    // header (a line starting with "[") or the end of the file.
+    // header (a line starting with "[") or the end of the file. Our own
+    // http_headers inline table contains no "[", so it stays inside the match.
     `\\[mcp_servers\\.${MCP_SERVER_KEY}\\][^[]*`,
   );
   if (headerPattern.test(existing)) {
@@ -53,11 +72,11 @@ export function upsertCodexConfig(content: string | null, url: string): string {
   return `${existing}${sep}${block}`;
 }
 
-function installClaudeCode(url: string): McpInstallResult {
+function installClaudeCode(url: string, token: string): McpInstallResult {
   const path = join(homedir(), '.claude.json');
   try {
     const current = existsSync(path) ? readFileSync(path, 'utf8') : null;
-    writeFileSync(path, upsertClaudeConfig(current, url));
+    writeFileSync(path, upsertClaudeConfig(current, url, token));
     return {
       ok: true,
       detail:
@@ -71,12 +90,12 @@ function installClaudeCode(url: string): McpInstallResult {
   }
 }
 
-function installCodex(url: string): McpInstallResult {
+function installCodex(url: string, token: string): McpInstallResult {
   const path = join(homedir(), '.codex', 'config.toml');
   try {
     mkdirSync(dirname(path), { recursive: true });
     const current = existsSync(path) ? readFileSync(path, 'utf8') : null;
-    writeFileSync(path, upsertCodexConfig(current, url));
+    writeFileSync(path, upsertCodexConfig(current, url, token));
     return {
       ok: true,
       detail:
@@ -93,11 +112,12 @@ function installCodex(url: string): McpInstallResult {
 export function installMcpClient(
   client: McpInstallClient,
   url: string,
+  token: string,
 ): McpInstallResult {
   switch (client) {
     case 'claude-code':
-      return installClaudeCode(url);
+      return installClaudeCode(url, token);
     case 'codex':
-      return installCodex(url);
+      return installCodex(url, token);
   }
 }

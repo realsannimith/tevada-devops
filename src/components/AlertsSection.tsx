@@ -18,7 +18,9 @@ import { TelegramIcon } from '@/lib/brand-icons';
 import { CheckIcon, Loader2Icon } from '@/lib/icons';
 import {
   DEFAULT_ALERT_THRESHOLDS,
+  DEFAULT_TLS_EXPIRY_DAYS,
   type AlertsStatus,
+  type HttpCheckConfig,
   type ServerAlertConfig,
 } from '@/shared/ipc-types';
 
@@ -92,8 +94,24 @@ export function AlertsSection() {
     failureThreshold?: number;
     successThreshold?: number;
     reminderMinutes?: number;
+    httpChecks?: HttpCheckConfig[];
   }) {
     setStatus(await window.easyhost.alerts.setConfig(patch));
+  }
+
+  const httpChecks = config?.httpChecks ?? [];
+
+  async function saveHttpCheck(next: HttpCheckConfig) {
+    const exists = httpChecks.some((c) => c.id === next.id);
+    await patchConfig({
+      httpChecks: exists
+        ? httpChecks.map((c) => (c.id === next.id ? next : c))
+        : [...httpChecks, next],
+    });
+  }
+
+  async function removeHttpCheck(id: string) {
+    await patchConfig({ httpChecks: httpChecks.filter((c) => c.id !== id) });
   }
 
   async function saveServer(sc: ServerAlertConfig) {
@@ -264,6 +282,31 @@ export function AlertsSection() {
             )}
           </div>
 
+          {/* HTTP uptime checks */}
+          <div>
+            <p className="text-[11px] text-muted-foreground">Watched websites</p>
+            <p className="pb-1.5 text-xs text-muted-foreground">
+              Checked every 15s from this machine. Alerts when a URL stops
+              answering (or answers with an error), and optionally before its
+              TLS certificate expires.
+            </p>
+            <div className="grid gap-2">
+              {httpChecks.length > 0 && (
+                <div className="surface-panel divide-y divide-border">
+                  {httpChecks.map((hc) => (
+                    <HttpCheckRow
+                      key={hc.id}
+                      hc={hc}
+                      onChange={saveHttpCheck}
+                      onRemove={() => void removeHttpCheck(hc.id)}
+                    />
+                  ))}
+                </div>
+              )}
+              <AddHttpCheck onAdd={saveHttpCheck} />
+            </div>
+          </div>
+
           {/* Advanced anti-noise controls */}
           <div>
             <button
@@ -307,6 +350,85 @@ export function AlertsSection() {
           {error}
         </p>
       )}
+    </div>
+  );
+}
+
+function HttpCheckRow({
+  hc,
+  onChange,
+  onRemove,
+}: {
+  hc: HttpCheckConfig;
+  onChange: (hc: HttpCheckConfig) => void;
+  onRemove: () => void;
+}) {
+  const https = hc.url.startsWith('https:');
+  return (
+    <div className="px-3 py-2.5">
+      <div className="flex items-center gap-3">
+        <div className="min-w-0 flex-1">
+          <p className="truncate font-mono text-xs text-ink">{hc.url}</p>
+        </div>
+        <Switch
+          checked={hc.enabled}
+          onCheckedChange={(v) => onChange({ ...hc, enabled: v })}
+          aria-label={`Watch ${hc.url}`}
+        />
+        <Button variant="ghost" size="sm" onClick={onRemove}>
+          Remove
+        </Button>
+      </div>
+      {hc.enabled && https && (
+        <div className="mt-2.5 grid grid-cols-2 gap-2 border-t border-border pt-2.5">
+          <ThresholdField
+            label="TLS expires ≤ days"
+            value={hc.tlsExpiryDays}
+            onCommit={(v) => onChange({ ...hc, tlsExpiryDays: v })}
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** URL entry with normalization: a bare "example.com" becomes https://. */
+function AddHttpCheck({ onAdd }: { onAdd: (hc: HttpCheckConfig) => void }) {
+  const [url, setUrl] = useState('');
+
+  function add() {
+    const raw = url.trim();
+    if (!raw) return;
+    const withScheme = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
+    try {
+      // Validate + canonicalize so the engine never sees an unparsable URL.
+      const parsed = new URL(withScheme);
+      onAdd({
+        id: `hc_${Date.now()}`,
+        url: parsed.toString(),
+        enabled: true,
+        tlsExpiryDays:
+          parsed.protocol === 'https:' ? DEFAULT_TLS_EXPIRY_DAYS : null,
+      });
+      setUrl('');
+    } catch {
+      /* leave the text in place so the user can fix it */
+    }
+  }
+
+  return (
+    <div className="flex gap-2">
+      <Input
+        placeholder="https://example.com/health"
+        value={url}
+        onChange={(e) => setUrl(e.target.value)}
+        onKeyDown={(e) => e.key === 'Enter' && add()}
+        className="h-8"
+        aria-label="URL to watch"
+      />
+      <Button variant="outline" size="sm" onClick={add} disabled={!url.trim()}>
+        Add
+      </Button>
     </div>
   );
 }

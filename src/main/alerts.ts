@@ -21,11 +21,15 @@
  * Everything here is main-process only. The bot token is loaded from secrets.ts
  * on demand and never leaves this process.
  */
+import { request as httpRequest } from 'node:http';
+import { request as httpsRequest } from 'node:https';
+import type { TLSSocket } from 'node:tls';
 import {
   AlertConfig,
   AlertEvent,
   AlertMetric,
   AlertsStatus,
+  HttpCheckConfig,
   ServerAlertConfig,
   ServerStats,
   TelegramChatDetectResult,
@@ -40,6 +44,90 @@ import { escapeHtml, getMe, getUpdates, sendMessage } from './telegram';
 
 const CHECK_INTERVAL_MS = 15_000;
 const TOKEN_SECRET_ID = 'telegram-bot-token';
+const HTTP_PROBE_TIMEOUT_MS = 10_000;
+
+// ---------------------------------------------------------------------------
+// HTTP uptime probes (the `http` / `tls` metrics)
+// ---------------------------------------------------------------------------
+
+export type HttpProbeResult = {
+  up: boolean;
+  status?: number;
+  error?: string;
+  /** Days until the TLS certificate expires (https URLs, successful probes). */
+  certDaysLeft?: number;
+};
+
+/** Whole days from `now` until an RFC-ish date string; undefined if unparsable. */
+export function daysUntil(dateStr: string, now = Date.now()): number | undefined {
+  const t = new Date(dateStr).getTime();
+  if (!Number.isFinite(t)) return undefined;
+  return Math.floor((t - now) / 86_400_000);
+}
+
+/** "example.com" or "example.com/health" — the short name events carry. */
+export function httpCheckLabel(url: string): string {
+  try {
+    const u = new URL(url);
+    return u.pathname && u.pathname !== '/' ? `${u.host}${u.pathname}` : u.host;
+  } catch {
+    return url;
+  }
+}
+
+/**
+ * One GET probe. Healthy = the server answered with a status below 400
+ * (redirects count as up — the site is serving). The body is never downloaded:
+ * we resolve on the status line and destroy the request. On https the peer
+ * certificate's remaining validity rides along for the TLS-expiry rule.
+ */
+export function probeHttp(
+  url: string,
+  timeoutMs = HTTP_PROBE_TIMEOUT_MS,
+): Promise<HttpProbeResult> {
+  return new Promise((resolve) => {
+    let u: URL;
+    try {
+      u = new URL(url);
+    } catch {
+      resolve({ up: false, error: 'Invalid URL.' });
+      return;
+    }
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') {
+      resolve({ up: false, error: 'Only http(s) URLs are supported.' });
+      return;
+    }
+    let settled = false;
+    const done = (result: HttpProbeResult) => {
+      if (settled) return;
+      settled = true;
+      resolve(result);
+    };
+    const isHttps = u.protocol === 'https:';
+    const req = (isHttps ? httpsRequest : httpRequest)(
+      u,
+      {
+        method: 'GET',
+        timeout: timeoutMs,
+        headers: { 'user-agent': 'TevadaDevOps-uptime/1.0', accept: '*/*' },
+      },
+      (res) => {
+        let certDaysLeft: number | undefined;
+        if (isHttps) {
+          const cert = (res.socket as TLSSocket).getPeerCertificate?.();
+          if (cert && cert.valid_to) certDaysLeft = daysUntil(cert.valid_to);
+        }
+        const status = res.statusCode ?? 0;
+        res.resume();
+        done({ up: status > 0 && status < 400, status, certDaysLeft });
+        req.destroy();
+      },
+    );
+    req.on('timeout', () => req.destroy(new Error(`No response within ${Math.round(timeoutMs / 1000)}s.`)));
+    req.on('error', (err) => done({ up: false, error: err.message }));
+    req.end();
+  });
+}
 
 export type RuleState = {
   failures: number;
@@ -152,6 +240,23 @@ export class AlertEngine {
     void this.tick();
   }
 
+  /** Currently-firing incidents (rules whose `triggered` flag is set) — used by
+   *  the MCP get_alerts tool so external agents can triage without Telegram. */
+  snapshot(): { serverId: string; metric: AlertMetric; firedAt: number }[] {
+    const incidents: { serverId: string; metric: AlertMetric; firedAt: number }[] = [];
+    for (const [key, st] of this.states) {
+      if (!st.triggered) continue;
+      // Keys are `${serverId}:${metric}` and metrics never contain a colon.
+      const sep = key.lastIndexOf(':');
+      incidents.push({
+        serverId: key.slice(0, sep),
+        metric: key.slice(sep + 1) as AlertMetric,
+        firedAt: st.firedAt,
+      });
+    }
+    return incidents;
+  }
+
   /** Forget a server's counters and stop supervising it. */
   clearServer(serverId: string): void {
     for (const key of [...this.states.keys()]) {
@@ -178,8 +283,50 @@ export class AlertEngine {
         }
         await this.checkServer(sc, config);
       }
+      for (const hc of config.httpChecks ?? []) {
+        if (!hc.enabled) {
+          this.clearServer(hc.id); // same `${id}:` key prefix as server rules
+          continue;
+        }
+        await this.checkHttp(hc, config);
+      }
     } finally {
       this.ticking = false;
+    }
+  }
+
+  /** One URL check: reachability/status via `http`, cert validity via `tls`. */
+  private async checkHttp(hc: HttpCheckConfig, config: AlertConfig): Promise<void> {
+    const probe = await probeHttp(hc.url);
+    const label = httpCheckLabel(hc.url);
+    this.evaluate(config, {
+      serverId: hc.id,
+      serverName: label,
+      metric: 'http',
+      healthy: probe.up,
+      detail: probe.up
+        ? `${hc.url} is responding (HTTP ${probe.status})`
+        : probe.error
+          ? `${hc.url} failed: ${probe.error}`
+          : `${hc.url} returned HTTP ${probe.status}`,
+      value: probe.status,
+    });
+    // Only judged on a successful https probe — a down site should fire ONE
+    // incident (http), not drag a phantom TLS alert along with it.
+    if (
+      hc.tlsExpiryDays != null &&
+      probe.up &&
+      probe.certDaysLeft !== undefined
+    ) {
+      this.evaluate(config, {
+        serverId: hc.id,
+        serverName: label,
+        metric: 'tls',
+        healthy: probe.certDaysLeft > hc.tlsExpiryDays,
+        detail: `TLS certificate for ${label} expires in ${probe.certDaysLeft} day${probe.certDaysLeft === 1 ? '' : 's'} (threshold ${hc.tlsExpiryDays})`,
+        value: probe.certDaysLeft,
+        threshold: hc.tlsExpiryDays,
+      });
     }
   }
 
@@ -356,6 +503,8 @@ const METRIC_TITLES: Record<AlertMetric, { firing: string; resolved: string }> =
   memory: { firing: 'High memory usage', resolved: 'Memory back to normal' },
   disk: { firing: 'Disk almost full', resolved: 'Disk usage back to normal' },
   load: { firing: 'High load average', resolved: 'Load back to normal' },
+  http: { firing: 'Website down', resolved: 'Website back up' },
+  tls: { firing: 'TLS certificate expiring', resolved: 'TLS certificate renewed' },
 };
 
 /** "Jul 6, 1:24 AM" — the readable stamp every notification footer carries. */

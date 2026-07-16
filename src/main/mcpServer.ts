@@ -4,11 +4,15 @@
  * stays the single owner of SSH credentials and connections, and simply
  * exposes a small tool surface over Streamable HTTP on localhost.
  *
- * Security model: the endpoint binds to 127.0.0.1 only and rejects non-local
- * Host headers (DNS-rebinding protection), so only processes on this machine
- * can reach it. Starting the server is an explicit user action in Settings —
- * commands from connected agents then run with the same access the in-app
- * agent has.
+ * Security model: the endpoint binds to 127.0.0.1 only, rejects non-local
+ * Host headers (DNS-rebinding protection), and every request must present the
+ * per-install bearer token shown in Settings — so neither remote machines nor
+ * arbitrary local processes can drive it. Starting the server is an explicit
+ * user action in Settings — commands from connected agents then run with the
+ * same access the in-app agent has (or read-only, when that mode is on).
+ * Catastrophic commands (rm -rf /, mkfs, …) are rejected outright: MCP has no
+ * interactive approval channel, so the in-app confirmation seatbelt becomes a
+ * hard block here.
  */
 import { createServer, type Server as HttpServer } from 'node:http';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -17,15 +21,21 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 // the matching implementation under this compat subpath.
 import { z } from 'zod/v3';
 import type {
+  AlertMetric,
+  ArtifactsScanResult,
   ConnStatus,
+  DeploymentsResult,
+  DeployLogResult,
   ExecResult,
   GithubReposResult,
   McpStatus,
   Project,
   ServerProfile,
   ServerStats,
+  SftpEntry,
 } from '../shared/ipc-types';
 import type { Skill } from '../agent/skills';
+import { isCatastrophic } from '../agent/blacklist';
 
 /** Everything the tools need, injected by ipc.ts so this file stays testable. */
 export type McpDeps = {
@@ -43,6 +53,26 @@ export type McpDeps = {
    *  called per request so user skill edits apply without a restart. */
   listSkills: () => Skill[];
   sftpWriteFile: (serverId: string, path: string, content: string) => Promise<void>;
+  sftpReadFile: (
+    serverId: string,
+    path: string,
+    maxBytes: number,
+  ) => Promise<{ content: string; truncated: boolean }>;
+  sftpList: (
+    serverId: string,
+    path: string,
+  ) => Promise<{ path: string; entries: SftpEntry[] }>;
+  scanArtifacts: (serverId: string) => Promise<ArtifactsScanResult>;
+  listDeployments: (serverId: string) => Promise<DeploymentsResult>;
+  readDeployLog: (serverId: string, logPath: string) => Promise<DeployLogResult>;
+  /** Firing incidents from the background alert engine, plus whether alerting
+   *  is configured at all (token + chat present). */
+  getAlertsInfo: () => {
+    configured: boolean;
+    incidents: { serverId: string; metric: AlertMetric; firedAt: number }[];
+  };
+  /** Live read of the Settings toggle: true = expose only read/observe tools. */
+  isReadOnly: () => boolean;
   listGithubRepos: () => Promise<GithubReposResult>;
   githubAuthorizedServerIds: () => string[];
   setupDeployNotifications: (
@@ -52,18 +82,30 @@ export type McpDeps = {
 
 const MAX_COMMAND_TIMEOUT_S = 600;
 const DEFAULT_COMMAND_TIMEOUT_S = 120;
+const DEFAULT_READ_BYTES = 32 * 1024;
+const MAX_READ_BYTES = 512 * 1024;
 
 const SERVER_INSTRUCTIONS = [
   'Tevada DevOps gives you SSH access to the servers the user manages in the',
   'Tevada DevOps desktop app. Call list_servers first to see what exists (and',
-  'which project each server belongs to), then run_command to execute shell',
-  'commands. Connections are opened on demand — you never handle credentials.',
+  'which project each server belongs to), then run_command / run_script to',
+  'execute shell commands. Connections are opened on demand — you never handle',
+  'credentials. Use get_artifacts to discover what is running on a server',
+  '(sites, containers, databases, services), list_deploys / get_deploy_log to',
+  'inspect automated deployments, and get_alerts to see firing incidents.',
   'The app also ships a library of vetted DevOps skills (step-by-step',
   'procedures for deploys, hardening, backups, TLS, troubleshooting…) — the',
   'same ones its built-in agent follows. BEFORE starting work that matches a',
   'skill (call list_skills to see them), call load_skill and follow the',
   'instructions: they encode non-interactive flags, security defaults,',
   'verification steps, and rollback paths that keep servers safe.',
+].join(' ');
+
+const READ_ONLY_NOTE = [
+  ' NOTE: the user has enabled read-only mode — only listing/reading tools are',
+  'available; commands and writes are disabled. If a task needs changes, ask',
+  'the user to disable read-only mode in Settings → Agent Access or do the',
+  'change in the Tevada DevOps app itself.',
 ].join(' ');
 
 function text(value: string, isError = false) {
@@ -76,11 +118,17 @@ type ToolResult = {
   isError: boolean;
 };
 
-/** Builds one MCP server instance. Stateless transport = one per request. */
+/** Builds one MCP server instance. Stateless transport = one per request, so
+ *  the read-only toggle is read fresh here and applies without a restart. */
 export function buildMcpServer(deps: McpDeps): McpServer {
+  const readOnly = deps.isReadOnly();
   const server = new McpServer(
     { name: 'tevada-devops', version: '1.0.1' },
-    { instructions: SERVER_INSTRUCTIONS },
+    {
+      instructions: readOnly
+        ? SERVER_INSTRUCTIONS + READ_ONLY_NOTE
+        : SERVER_INSTRUCTIONS,
+    },
   );
 
   // Loosely-typed registrar: checking our zod schemas against the SDK's own
@@ -96,6 +144,20 @@ export function buildMcpServer(deps: McpDeps): McpServer {
     },
     cb: (args: unknown) => ToolResult | Promise<ToolResult>,
   ) => void;
+
+  // Write/execute tools are simply not registered in read-only mode, so
+  // clients see an accurate tool list instead of runtime refusals.
+  const registerWriteTool: typeof registerTool = readOnly
+    ? () => {}
+    : registerTool;
+
+  /** The in-app agent's catastrophic-command seatbelt asks the user to
+   *  confirm; MCP has no approval channel, so a match is a hard reject. */
+  const guardMessage = (reason?: string) =>
+    `Blocked by the Tevada DevOps safety guard: ${reason ?? 'catastrophic command.'} ` +
+    'This MCP endpoint has no interactive approval flow, so commands the in-app agent ' +
+    'would ask a human to confirm are rejected here. If this is genuinely intended, ' +
+    'ask the user to run it themselves in the Tevada DevOps app (its chat has an approval flow).';
 
   /** Accepts a server id OR (case-insensitive) name, so agents can say
    *  "run this on staging" without a lookup round-trip. */
@@ -171,12 +233,12 @@ export function buildMcpServer(deps: McpDeps): McpServer {
     },
   );
 
-  registerTool(
+  registerWriteTool(
     'run_command',
     {
       title: 'Run command',
       description:
-        'Run a shell command on one of the servers over SSH (connects automatically). Returns stdout, stderr, and the exit code.',
+        'Run a shell command on one of the servers over SSH (connects automatically). Returns stdout, stderr, and the exit code. Prefer run_script for anything multi-line or with complex quoting.',
       inputSchema: {
         server: z
           .string()
@@ -203,6 +265,8 @@ export function buildMcpServer(deps: McpDeps): McpServer {
           true,
         );
       }
+      const cat = isCatastrophic(command);
+      if (cat.blocked) return text(guardMessage(cat.reason), true);
       const connError = await ensureConnected(profile);
       if (connError) return text(connError, true);
       const timeoutMs =
@@ -221,6 +285,183 @@ export function buildMcpServer(deps: McpDeps): McpServer {
       } catch (err) {
         return text(
           `Command failed: ${err instanceof Error ? err.message : String(err)}`,
+          true,
+        );
+      }
+    },
+  );
+
+  registerWriteTool(
+    'run_script',
+    {
+      title: 'Run script',
+      description:
+        'Upload a multi-line bash script to a server and execute it, returning stdout, stderr, and the exit code. Prefer this over run_command for anything with heredocs, complex quoting, loops, or more than ~3 chained commands. The script runs with `set -euo pipefail` prepended, so it stops at the first failing line.',
+      inputSchema: {
+        server: z.string().describe('Server id or name (see list_servers).'),
+        script: z.string().describe('The bash script body (no shebang needed).'),
+        sudo: z
+          .boolean()
+          .optional()
+          .describe('Run the script as root (default false).'),
+        timeoutSeconds: z
+          .number()
+          .optional()
+          .describe(
+            `Seconds before the script is aborted (default ${DEFAULT_COMMAND_TIMEOUT_S}, max ${MAX_COMMAND_TIMEOUT_S}).`,
+          ),
+      },
+    },
+    async (args: unknown) => {
+      const { server: ref, script, sudo, timeoutSeconds } = args as {
+        server: string;
+        script: string;
+        sudo?: boolean;
+        timeoutSeconds?: number;
+      };
+      const profile = resolveServer(ref);
+      if (!profile) {
+        return text(
+          `Unknown server "${ref}". Call list_servers to see available servers.`,
+          true,
+        );
+      }
+      const cat = isCatastrophic(script);
+      if (cat.blocked) return text(guardMessage(cat.reason), true);
+      const connError = await ensureConnected(profile);
+      if (connError) return text(connError, true);
+      const timeoutMs =
+        Math.min(
+          Math.max(timeoutSeconds ?? DEFAULT_COMMAND_TIMEOUT_S, 1),
+          MAX_COMMAND_TIMEOUT_S,
+        ) * 1000;
+      const remotePath = `/tmp/easyhost-mcp-script-${Date.now()}-${script.length}.sh`;
+      try {
+        await deps.sftpWriteFile(
+          profile.id,
+          remotePath,
+          `set -euo pipefail\n${script}\n`,
+        );
+        const runner = sudo ? 'sudo bash' : 'bash';
+        const result = await deps.exec(
+          profile.id,
+          `${runner} ${remotePath}; rc=$?; rm -f ${remotePath}; exit $rc`,
+          { timeoutMs },
+        );
+        const parts = [
+          `exit code: ${result.exitCode ?? 'unknown'}${result.timedOut ? ' (timed out)' : ''}${result.truncated ? ' (output truncated)' : ''}`,
+        ];
+        if (result.stdout.trim()) parts.push(`stdout:\n${result.stdout}`);
+        if (result.stderr.trim()) parts.push(`stderr:\n${result.stderr}`);
+        return text(parts.join('\n\n'), (result.exitCode ?? 1) !== 0);
+      } catch (err) {
+        return text(
+          `Script failed: ${err instanceof Error ? err.message : String(err)}`,
+          true,
+        );
+      } finally {
+        // The in-band `rm -f` only runs when the exec completes; on timeout or
+        // a dropped connection the staged script would leak under /tmp.
+        void deps
+          .exec(profile.id, `rm -f ${remotePath}`, { timeoutMs: 5000 })
+          .catch((): void => {});
+      }
+    },
+  );
+
+  registerTool(
+    'read_file',
+    {
+      title: 'Read file',
+      description:
+        'Read the contents of a text file on a server over SFTP (connects automatically). Prefer this over `cat` via run_command — it is reliable for large files and returns a clean truncation marker. For root-only files, fall back to run_command with sudo cat.',
+      inputSchema: {
+        server: z.string().describe('Server id or name (see list_servers).'),
+        path: z.string().describe('Absolute file path.'),
+        maxBytes: z
+          .number()
+          .optional()
+          .describe(
+            `Read at most this many bytes (default ${DEFAULT_READ_BYTES}, max ${MAX_READ_BYTES}).`,
+          ),
+      },
+    },
+    async (args: unknown) => {
+      const { server: ref, path, maxBytes } = args as {
+        server: string;
+        path: string;
+        maxBytes?: number;
+      };
+      const profile = resolveServer(ref);
+      if (!profile) {
+        return text(
+          `Unknown server "${ref}". Call list_servers to see available servers.`,
+          true,
+        );
+      }
+      const connError = await ensureConnected(profile);
+      if (connError) return text(connError, true);
+      const cap = Math.min(Math.max(maxBytes ?? DEFAULT_READ_BYTES, 1), MAX_READ_BYTES);
+      try {
+        const { content, truncated } = await deps.sftpReadFile(
+          profile.id,
+          path,
+          cap,
+        );
+        return text(
+          truncated
+            ? `${content}\n…[truncated at ${cap} bytes — pass a larger maxBytes to read more]`
+            : content,
+        );
+      } catch (err) {
+        return text(
+          `Read failed: ${err instanceof Error ? err.message : String(err)}`,
+          true,
+        );
+      }
+    },
+  );
+
+  registerTool(
+    'list_directory',
+    {
+      title: 'List directory',
+      description:
+        'List a directory on a server over SFTP (connects automatically). Returns name, type, size, mtime, and permissions for each entry — more reliable than parsing `ls` output.',
+      inputSchema: {
+        server: z.string().describe('Server id or name (see list_servers).'),
+        path: z
+          .string()
+          .describe('Absolute directory path (or "." for the login home).'),
+      },
+    },
+    async (args: unknown) => {
+      const { server: ref, path } = args as { server: string; path: string };
+      const profile = resolveServer(ref);
+      if (!profile) {
+        return text(
+          `Unknown server "${ref}". Call list_servers to see available servers.`,
+          true,
+        );
+      }
+      const connError = await ensureConnected(profile);
+      if (connError) return text(connError, true);
+      try {
+        const { path: resolved, entries } = await deps.sftpList(
+          profile.id,
+          path,
+        );
+        const rows = entries.map((e) => ({
+          name: e.name,
+          type: e.type,
+          size: e.size,
+          mtime: new Date(e.mtime).toISOString(),
+          mode: (e.mode & 0o7777).toString(8).padStart(3, '0'),
+        }));
+        return text(JSON.stringify({ path: resolved, entries: rows }, null, 2));
+      } catch (err) {
+        return text(
+          `List failed: ${err instanceof Error ? err.message : String(err)}`,
           true,
         );
       }
@@ -253,6 +494,124 @@ export function buildMcpServer(deps: McpDeps): McpServer {
         );
       }
       return text(JSON.stringify(stats, null, 2));
+    },
+  );
+
+  registerTool(
+    'get_artifacts',
+    {
+      title: 'Get artifacts',
+      description:
+        "Scan a server for what is deployed and running — websites, Docker containers, databases, systemd services, and scheduled backups — with status, ports, and whether each port is reachable from outside the server. Call this before exploratory shell commands: it answers \"what's on this box?\" in one call.",
+      inputSchema: {
+        server: z.string().describe('Server id or name (see list_servers).'),
+      },
+    },
+    async (args: unknown) => {
+      const { server: ref } = args as { server: string };
+      const profile = resolveServer(ref);
+      if (!profile) {
+        return text(
+          `Unknown server "${ref}". Call list_servers to see available servers.`,
+          true,
+        );
+      }
+      const connError = await ensureConnected(profile);
+      if (connError) return text(connError, true);
+      const res = await deps.scanArtifacts(profile.id);
+      if (res.ok === false) return text(`Scan failed: ${res.error}`, true);
+      return text(JSON.stringify(res.artifacts, null, 2));
+    },
+  );
+
+  registerTool(
+    'list_deploys',
+    {
+      title: 'List deploys',
+      description:
+        'List the automated deployments registered on a server (GitHub auto-deploys set up through this app): app name, repo, branch, checkout dir, port, redeploy script, env file, plus recent deploy events (ok/failed/rollback, newest first). Use the returned `log` path with get_deploy_log to read build output.',
+      inputSchema: {
+        server: z.string().describe('Server id or name (see list_servers).'),
+      },
+    },
+    async (args: unknown) => {
+      const { server: ref } = args as { server: string };
+      const profile = resolveServer(ref);
+      if (!profile) {
+        return text(
+          `Unknown server "${ref}". Call list_servers to see available servers.`,
+          true,
+        );
+      }
+      const connError = await ensureConnected(profile);
+      if (connError) return text(connError, true);
+      const res = await deps.listDeployments(profile.id);
+      if (res.ok === false) return text(`Listing failed: ${res.error}`, true);
+      if (res.deployments.length === 0) {
+        return text(
+          'No automated deployments are registered on this server (the github-auto-deploy skill registers them under /etc/easyhost/deploys/).',
+        );
+      }
+      return text(JSON.stringify(res.deployments, null, 2));
+    },
+  );
+
+  registerTool(
+    'get_deploy_log',
+    {
+      title: 'Get deploy log',
+      description:
+        'Read the build/deploy log of an automated deployment (the `log` path from list_deploys). Use this to debug a failed deploy.',
+      inputSchema: {
+        server: z.string().describe('Server id or name (see list_servers).'),
+        logPath: z
+          .string()
+          .describe('The deploy log path, from list_deploys (`log` field).'),
+      },
+    },
+    async (args: unknown) => {
+      const { server: ref, logPath } = args as {
+        server: string;
+        logPath: string;
+      };
+      const profile = resolveServer(ref);
+      if (!profile) {
+        return text(
+          `Unknown server "${ref}". Call list_servers to see available servers.`,
+          true,
+        );
+      }
+      const connError = await ensureConnected(profile);
+      if (connError) return text(connError, true);
+      const res = await deps.readDeployLog(profile.id, logPath);
+      if (res.ok === false) return text(`Read failed: ${res.error}`, true);
+      return text(res.content || '(log is empty)');
+    },
+  );
+
+  registerTool(
+    'get_alerts',
+    {
+      title: 'Get alerts',
+      description:
+        "Currently-firing incidents from the app's background alert engine (server unreachable, high CPU/memory/disk/load). Call this when the user asks why they were alerted, or to check fleet health before/after a change. Empty incidents = nothing firing right now.",
+      inputSchema: {},
+    },
+    () => {
+      const info = deps.getAlertsInfo();
+      if (!info.configured) {
+        return text(
+          'Alerting is not configured — the user can connect Telegram under Settings → Alerts in the Tevada DevOps app. No incident state is tracked until then.',
+        );
+      }
+      const servers = deps.listServers();
+      const incidents = info.incidents.map((i) => ({
+        server: servers.find((s) => s.id === i.serverId)?.name ?? i.serverId,
+        metric: i.metric,
+        state: 'firing' as const,
+        since: i.firedAt > 0 ? new Date(i.firedAt).toISOString() : undefined,
+      }));
+      return text(JSON.stringify({ incidents }, null, 2));
     },
   );
 
@@ -299,8 +658,7 @@ export function buildMcpServer(deps: McpDeps): McpServer {
       // external agents don't stall looking for `runCommand`.
       const mapping = [
         'Note — this skill was written for the app\'s built-in agent; in this MCP context map its tool names as follows:',
-        '- runCommand → run_command; writeRemoteFile → write_file; listGithubRepos → list_github_repos; setupDeployNotifications → setup_deploy_notifications.',
-        '- runScript → write the script with write_file, then execute it with run_command.',
+        '- runCommand → run_command; runScript → run_script; readRemoteFile → read_file; writeRemoteFile → write_file; listGithubRepos → list_github_repos; setupDeployNotifications → setup_deploy_notifications.',
         '- generatePassword → generate one yourself (e.g. `openssl rand -base64 24` via run_command) and avoid echoing secrets into shell history.',
         '- updateTodos and request…Setup form tools → not available here; track your own plan and ask the user for those values in your own conversation.',
         '',
@@ -343,7 +701,7 @@ export function buildMcpServer(deps: McpDeps): McpServer {
     },
   );
 
-  registerTool(
+  registerWriteTool(
     'setup_deploy_notifications',
     {
       title: 'Set up deploy notifications',
@@ -372,7 +730,7 @@ export function buildMcpServer(deps: McpDeps): McpServer {
     },
   );
 
-  registerTool(
+  registerWriteTool(
     'write_file',
     {
       title: 'Write file',
@@ -465,6 +823,10 @@ export class TevadaMcpServer {
 
   constructor(
     private readonly deps: McpDeps,
+    /** The per-install bearer token every request must present. `null` only
+     *  when token storage failed entirely — the endpoint then refuses all
+     *  requests rather than running open. */
+    private readonly getToken: () => string | null,
     private readonly onStatusChange: (status: McpStatus) => void = () => {},
   ) {}
 
@@ -473,6 +835,7 @@ export class TevadaMcpServer {
       running: this.http !== null,
       port: this.port,
       url: this.http ? `http://127.0.0.1:${this.port}/mcp` : null,
+      token: this.getToken(),
       error: this.lastError,
     };
   }
@@ -493,6 +856,21 @@ export class TevadaMcpServer {
       void (async () => {
         if (!req.url || !req.url.startsWith('/mcp')) {
           res.writeHead(404).end('Not found');
+          return;
+        }
+        // Bearer auth: localhost binding keeps other MACHINES out; the token
+        // keeps other local PROCESSES out. Constant shape either way — a 401
+        // never reveals whether the path or the token was the problem.
+        const token = this.getToken();
+        if (!token || req.headers.authorization !== `Bearer ${token}`) {
+          res
+            .writeHead(401, { 'content-type': 'application/json' })
+            .end(
+              JSON.stringify({
+                error:
+                  'Unauthorized: pass the auth token from Tevada DevOps Settings → Agent Access as "Authorization: Bearer <token>".',
+              }),
+            );
           return;
         }
         // Stateless mode: a fresh server + transport per request keeps the

@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { ServersProvider, useServers } from '@/hooks/useServers';
 import { ProjectsProvider, useProjects } from '@/hooks/useProjects';
+import { DeployWatchProvider } from '@/hooks/useDeployWatch';
 import { ServerSidebar } from '@/components/ServerSidebar';
 import { ServerFormDialog } from '@/components/ServerFormDialog';
 import { ProjectFormDialog } from '@/components/ProjectFormDialog';
@@ -13,6 +14,7 @@ import { FilesView } from '@/components/FilesView';
 import { MonitoringView } from '@/components/MonitoringView';
 import { ArtifactsView } from '@/components/ArtifactsView';
 import { DeploymentsView } from '@/components/DeploymentsView';
+import { TunnelsView } from '@/components/TunnelsView';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Button } from '@/components/ui/button';
 import {
@@ -30,7 +32,8 @@ export type ServerTab =
   | 'files'
   | 'monitoring'
   | 'artifacts'
-  | 'deploys';
+  | 'deploys'
+  | 'tunnels';
 
 export type View =
   | { kind: 'server'; serverId: string; tab: ServerTab }
@@ -213,6 +216,7 @@ function ServerPane({
               <TabsTrigger value="monitoring">Monitoring</TabsTrigger>
               <TabsTrigger value="artifacts">Artifacts</TabsTrigger>
               <TabsTrigger value="deploys">Deploys</TabsTrigger>
+              <TabsTrigger value="tunnels">Tunnels</TabsTrigger>
             </TabsList>
           </Tabs>
           {connected ? (
@@ -245,6 +249,8 @@ function ServerPane({
           <MonitoringView serverId={server.id} />
         ) : view.tab === 'deploys' ? (
           <DeploymentsView serverId={server.id} onNavigate={onNavigate} />
+        ) : view.tab === 'tunnels' ? (
+          <TunnelsView serverId={server.id} />
         ) : (
           <ArtifactsView serverId={server.id} onNavigate={onNavigate} />
         )}
@@ -292,7 +298,9 @@ export default function App() {
   return (
     <ServersProvider>
       <ProjectsProvider>
-        <Shell />
+        <DeployWatchProvider>
+          <Shell />
+        </DeployWatchProvider>
       </ProjectsProvider>
     </ServersProvider>
   );
