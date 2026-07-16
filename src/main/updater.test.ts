@@ -1,15 +1,21 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import type { UpdateState } from '../shared/ipc-types';
 
-vi.mock('electron', () => ({
-  app: {
+const { electronApp } = vi.hoisted(() => ({
+  electronApp: {
     isPackaged: false,
     getVersion: () => '1.0.1',
     quit: vi.fn(),
   },
+}));
+
+vi.mock('electron', () => ({
+  app: electronApp,
   shell: { openExternal: vi.fn() },
 }));
 
 import {
+  AppUpdater,
   buildMacSwapScript,
   isVersionNewer,
   pickUpdateAsset,
@@ -74,5 +80,91 @@ describe('buildMacSwapScript', () => {
     // Failure path restores the backup before ever deleting it.
     expect(script).toContain("mv '/tmp/stage/previous-bundle.app' '/Applications/Tevada DevOps.app'");
     expect(script).toContain("open '/Applications/Tevada DevOps.app'");
+  });
+});
+
+describe('AppUpdater auto-download', () => {
+  const originalPlatform = process.platform;
+
+  afterEach(() => {
+    Object.defineProperty(process, 'platform', { value: originalPlatform });
+    electronApp.isPackaged = false;
+    vi.unstubAllGlobals();
+  });
+
+  it('stages a detected update in the background, ready to install', async () => {
+    // Run as a packaged macOS build so the updater is enabled and a zip asset
+    // exists for the platform (Linux CI would otherwise disable it).
+    Object.defineProperty(process, 'platform', { value: 'darwin' });
+    electronApp.isPackaged = true;
+
+    const zipBytes = new Uint8Array([0x50, 0x4b, 0x03, 0x04]);
+    const fetchMock = vi
+      .fn()
+      // 1st call: the GitHub "latest release" check.
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          tag_name: 'v1.0.2',
+          html_url: 'https://github.com/example/releases/tag/v1.0.2',
+          assets: [
+            {
+              name: `Tevada.DevOps-darwin-${process.arch}-1.0.2.zip`,
+              browser_download_url: 'https://example.test/update.zip',
+              size: zipBytes.byteLength,
+            },
+          ],
+        }),
+      })
+      // 2nd call: the asset download, started automatically by check().
+      .mockResolvedValueOnce({
+        ok: true,
+        headers: { get: () => String(zipBytes.byteLength) },
+        body: {
+          getReader: () => {
+            let sent = false;
+            return {
+              read: async () =>
+                sent
+                  ? { done: true, value: undefined }
+                  : ((sent = true), { done: false, value: zipBytes }),
+            };
+          },
+        },
+      });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const states: UpdateState[] = [];
+    const updater = new AppUpdater((s) => states.push(s), 'example/repo');
+    await updater.check();
+
+    // check() kicks the download off without awaiting it.
+    await vi.waitFor(() => expect(updater.getState().status).toBe('downloaded'));
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    // Collapse repeated statuses (progress events re-emit 'downloading').
+    const sequence = states
+      .map((s) => s.status)
+      .filter((status, i, all) => i === 0 || status !== all[i - 1]);
+    expect(sequence).toEqual(['checking', 'available', 'downloading', 'downloaded']);
+    expect(updater.getState().availableVersion).toBe('1.0.2');
+  });
+
+  it('does not re-check once an update is staged', async () => {
+    Object.defineProperty(process, 'platform', { value: 'darwin' });
+    electronApp.isPackaged = true;
+
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    const updater = new AppUpdater(() => {}, 'example/repo');
+    // Forcing the staged state through the public API needs a download, so
+    // simulate it directly: a check while 'downloaded' must be a no-op.
+    (updater as unknown as { state: UpdateState }).state = {
+      status: 'downloaded',
+      currentVersion: '1.0.1',
+      availableVersion: '1.0.2',
+    };
+    await updater.check();
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });

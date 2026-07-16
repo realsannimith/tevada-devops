@@ -4,8 +4,11 @@
  *
  *  - Detect: poll the GitHub "latest release" API (on startup, every 4 h, and
  *    on demand) and compare tags semver-style against the running version.
- *  - Download: stream the platform's installer asset to a temp dir with
- *    progress events pushed to the renderer.
+ *  - Download: starts automatically in the background as soon as an update is
+ *    detected (FCode's prepare-in-background step), streaming the platform's
+ *    installer asset to a temp dir with progress events pushed to the
+ *    renderer. Installing — and the restart it implies — stays user-controlled
+ *    so active work is never interrupted.
  *  - Install:
  *      macOS   — our builds are ad-hoc signed, which Squirrel.Mac refuses, so
  *                we swap the .app bundle directly (FCode's unsigned-mac path):
@@ -192,9 +195,14 @@ export class AppUpdater {
   private busy = false;
   private assetUrl: string | null = null;
   private assetName: string | null = null;
+  private downloadedPath: string | null = null;
 
-  constructor(private readonly onChange: (state: UpdateState) => void = () => {}) {
-    const disabledReason = !UPDATE_REPO
+  constructor(
+    private readonly onChange: (state: UpdateState) => void = () => {},
+    /** Test seam — production callers always use the baked-in feed. */
+    private readonly repo: string = UPDATE_REPO,
+  ) {
+    const disabledReason = !this.repo
       ? 'No update feed is configured for this build.'
       : !app.isPackaged
         ? 'Updates only run in packaged builds.'
@@ -230,12 +238,16 @@ export class AppUpdater {
   }
 
   async check(): Promise<UpdateState> {
-    if (this.state.status === 'disabled' || this.busy) return this.state;
+    // Like FCode, don't re-check while an update is mid-download or already
+    // staged — the staged build installs on the next restart anyway.
+    if (this.state.status === 'disabled' || this.state.status === 'downloaded' || this.busy) {
+      return this.state;
+    }
     this.busy = true;
     this.setState({ status: 'checking', error: undefined });
     try {
       const res = await fetch(
-        `https://api.github.com/repos/${UPDATE_REPO}/releases/latest`,
+        `https://api.github.com/repos/${this.repo}/releases/latest`,
         {
           headers: {
             Accept: 'application/vnd.github+json',
@@ -275,12 +287,18 @@ export class AppUpdater {
     } finally {
       this.busy = false;
     }
+    // Auto-download (FCode's prepare-in-background): stage the update as soon
+    // as it is detected so installing is just a restart. User-triggered
+    // installs still work if this background attempt fails.
+    if (this.state.status === 'available' && this.assetUrl) {
+      void this.download();
+    }
     return this.state;
   }
 
-  /** Download the platform asset with progress, then hand off to the installer
-   *  and quit. On macOS the detached script relaunches the new version. */
-  async downloadAndInstall(): Promise<UpdateState> {
+  /** Stream the platform asset to a temp file with progress. Runs
+   *  automatically after a successful check; safe to retry after a failure. */
+  async download(): Promise<UpdateState> {
     if (this.busy || this.state.status !== 'available' || !this.assetUrl) {
       return this.state;
     }
@@ -320,18 +338,10 @@ export class AppUpdater {
         out.end((e?: Error | null) => (e ? reject(e) : resolve()));
       });
 
-      this.setState({ status: 'installing', downloadPercent: 100 });
-      if (process.platform === 'darwin') {
-        prepareMacInstall(filePath);
-        app.quit();
-      } else if (process.platform === 'win32') {
-        // Squirrel Setup.exe updates in place and restarts the app.
-        ChildProcess.spawn(filePath, ['--silent'], { detached: true, stdio: 'ignore' }).unref();
-        app.quit();
-      } else {
-        throw new Error('In-app install is not supported on this platform.');
-      }
+      this.downloadedPath = filePath;
+      this.setState({ status: 'downloaded', downloadPercent: 100 });
     } catch (err) {
+      this.downloadedPath = null;
       this.setState({
         status: 'available',
         error: err instanceof Error ? err.message : String(err),
@@ -343,9 +353,46 @@ export class AppUpdater {
     return this.state;
   }
 
+  /** Hand the staged download to the platform installer and quit. On macOS the
+   *  detached script relaunches the new version. If the background download
+   *  failed (status is back to "available"), retry it first. */
+  async install(): Promise<UpdateState> {
+    if (this.state.status === 'available') {
+      await this.download();
+    }
+    if (this.busy || this.state.status !== 'downloaded' || !this.downloadedPath) {
+      return this.state;
+    }
+    this.busy = true;
+    this.setState({ status: 'installing', error: undefined });
+    try {
+      if (process.platform === 'darwin') {
+        prepareMacInstall(this.downloadedPath);
+        app.quit();
+      } else if (process.platform === 'win32') {
+        // Squirrel Setup.exe updates in place and restarts the app.
+        ChildProcess.spawn(this.downloadedPath, ['--silent'], {
+          detached: true,
+          stdio: 'ignore',
+        }).unref();
+        app.quit();
+      } else {
+        throw new Error('In-app install is not supported on this platform.');
+      }
+    } catch (err) {
+      this.setState({
+        status: 'downloaded',
+        error: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      this.busy = false;
+    }
+    return this.state;
+  }
+
   async openReleasesPage(): Promise<void> {
     await shell.openExternal(
-      this.state.releaseUrl ?? `https://github.com/${UPDATE_REPO}/releases/latest`,
+      this.state.releaseUrl ?? `https://github.com/${this.repo}/releases/latest`,
     );
   }
 }

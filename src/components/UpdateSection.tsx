@@ -1,8 +1,9 @@
 /**
  * "Updates" section of the Settings dialog: shows the running version, checks
  * the GitHub releases feed on demand (main also checks on startup and every
- * 4 h), and downloads + installs a newer build in-app — with a releases-page
- * fallback for platforms where self-install isn't possible.
+ * 4 h), and reflects the automatic background download — once an update is
+ * staged, installing is a one-click restart. Falls back to the releases page
+ * on platforms where self-install isn't possible.
  */
 import { useEffect, useState } from 'react';
 import { Button } from '@/components/ui/button';
@@ -41,18 +42,22 @@ export function UpdateSection() {
                 ? 'Checking for updates…'
                 : state.status === 'downloading'
                   ? `Downloading v${state.availableVersion}… ${Math.round(state.downloadPercent ?? 0)}%`
-                  : state.status === 'installing'
-                    ? 'Installing — the app will restart itself.'
-                    : state.status === 'available'
-                      ? `Version ${state.availableVersion} is available.`
-                      : state.status === 'up-to-date'
-                        ? 'You are on the latest version.'
-                        : state.status === 'error'
-                          ? `Update check failed: ${state.error}`
-                          : 'Updates are checked automatically in the background.'}
+                  : state.status === 'downloaded'
+                    ? `Version ${state.availableVersion} is ready — restart to finish installing.`
+                    : state.status === 'installing'
+                      ? 'Installing — the app will restart itself.'
+                      : state.status === 'available'
+                        ? `Version ${state.availableVersion} is available.`
+                        : state.status === 'up-to-date'
+                          ? 'You are on the latest version.'
+                          : state.status === 'error'
+                            ? `Update check failed: ${state.error}`
+                            : 'Updates are checked automatically in the background.'}
           </p>
         </div>
-        {state.status !== 'disabled' && state.status !== 'available' && (
+        {state.status !== 'disabled' &&
+          state.status !== 'available' &&
+          state.status !== 'downloaded' && (
           <Button
             variant="outline"
             size="sm"
@@ -66,6 +71,29 @@ export function UpdateSection() {
             )}
             Check now
           </Button>
+        )}
+        {state.status === 'downloaded' && (
+          <div className="flex items-center gap-2">
+            {state.releaseUrl && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => void window.easyhost.updates.openReleases()}
+                title="Open the release notes on GitHub"
+              >
+                Notes
+                <ExternalLinkIcon className="size-3.5" />
+              </Button>
+            )}
+            <Button
+              variant="prominent"
+              size="sm"
+              onClick={() => void window.easyhost.updates.install()}
+            >
+              <CloudDownloadIcon className="size-3.5" />
+              Restart to update
+            </Button>
+          </div>
         )}
         {state.status === 'available' && (
           <div className="flex items-center gap-2">
@@ -112,7 +140,7 @@ export function UpdateSection() {
         </div>
       )}
 
-      {state.status === 'available' && state.error && (
+      {(state.status === 'available' || state.status === 'downloaded') && state.error && (
         <p className="text-[11px] text-destructive" role="alert">
           {state.error} — you can retry, or download it from the releases page.
         </p>

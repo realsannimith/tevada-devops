@@ -1219,6 +1219,8 @@ export type UpdateState = {
     | 'up-to-date'
     | 'available'
     | 'downloading'
+    /** Staged in the background and ready to install — just needs a restart. */
+    | 'downloaded'
     | 'installing'
     | 'error'
     | 'disabled';

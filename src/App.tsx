@@ -3,6 +3,7 @@ import { ServersProvider, useServers } from '@/hooks/useServers';
 import { ProjectsProvider, useProjects } from '@/hooks/useProjects';
 import { DeployWatchProvider } from '@/hooks/useDeployWatch';
 import { ServerSidebar } from '@/components/ServerSidebar';
+import { SessionTabStrip } from '@/components/SessionTabStrip';
 import { ServerFormDialog } from '@/components/ServerFormDialog';
 import { ProjectFormDialog } from '@/components/ProjectFormDialog';
 import { SettingsView } from '@/components/SettingsView';
@@ -42,10 +43,15 @@ export type View =
   | { kind: 'wizards' }
   | { kind: 'settings' };
 
+/** An open host session in the Termius-style tab row. Remembers which feature
+ *  tab (terminal/files/…) was active so refocusing restores the user's place. */
+type SessionTab = { serverId: string; tab: ServerTab };
+
 function Shell() {
-  const { servers } = useServers();
+  const { servers, statusOf } = useServers();
   const { projects } = useProjects();
   const [view, setView] = useState<View>({ kind: 'chat' });
+  const [sessionTabs, setSessionTabs] = useState<SessionTab[]>([]);
   const [addOpen, setAddOpen] = useState(false);
   const [editingServerId, setEditingServerId] = useState<string | null>(null);
   const editingServer = editingServerId
@@ -59,6 +65,51 @@ function Shell() {
     ? projects.find((p) => p.id === editingProjectId)
     : null;
   const projectDialogOpen = addProjectOpen || Boolean(editingProject);
+
+  /** All navigation funnels through here so opening a server (from the
+   *  sidebar, dashboard, deploys, …) registers/refreshes its session tab. */
+  const navigate = (v: View) => {
+    if (v.kind === 'server') {
+      setSessionTabs((prev) => {
+        const i = prev.findIndex((t) => t.serverId === v.serverId);
+        if (i === -1) return [...prev, { serverId: v.serverId, tab: v.tab }];
+        const next = [...prev];
+        next[i] = { serverId: v.serverId, tab: v.tab };
+        return next;
+      });
+    }
+    setView(v);
+  };
+
+  /** Close a session tab (the SSH connection is left as-is — reopening the
+   *  host reattaches to the live terminal). Focus falls to the neighbor tab. */
+  const closeSessionTab = (serverId: string) => {
+    const idx = sessionTabs.findIndex((t) => t.serverId === serverId);
+    const next = sessionTabs.filter((t) => t.serverId !== serverId);
+    setSessionTabs(next);
+    if (view.kind === 'server' && view.serverId === serverId) {
+      const neighbor = next[Math.min(idx, next.length - 1)];
+      setView(
+        neighbor
+          ? { kind: 'server', serverId: neighbor.serverId, tab: neighbor.tab }
+          : { kind: 'chat' },
+      );
+    }
+  };
+
+  // Tabs for servers that were deleted while open would 404; drop them here.
+  const tabItems = sessionTabs.flatMap((t) => {
+    const server = servers.find((s) => s.id === t.serverId);
+    if (!server) return [];
+    return [
+      {
+        id: server.id,
+        name: server.name,
+        status: statusOf(server.id),
+        active: view.kind === 'server' && view.serverId === server.id,
+      },
+    ];
+  });
 
   const openAddProject = () => {
     setEditingProjectId(null);
@@ -82,7 +133,7 @@ function Shell() {
   const openEditServer = (serverId: string) => {
     setAddOpen(false);
     setEditingServerId(serverId);
-    setView({ kind: 'server', serverId, tab: 'terminal' });
+    navigate({ kind: 'server', serverId, tab: 'terminal' });
   };
 
   const setServerDialogOpen = (open: boolean) => {
@@ -93,12 +144,9 @@ function Shell() {
 
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-background text-foreground">
-      {/* Frameless titlebar: the whole top strip drags the window. */}
-      <div className="drag-region fixed inset-x-0 top-0 z-50 h-8" />
-
       <ServerSidebar
         view={view}
-        onNavigate={setView}
+        onNavigate={navigate}
         onAddServer={openAddServer}
         onEditServer={openEditServer}
         onAddProject={openAddProject}
@@ -106,31 +154,48 @@ function Shell() {
         onOpenSettings={() => setView({ kind: 'settings' })}
       />
 
-      {/* Inset content card — floats with an even gutter on all sides so the
-          frosted rail and the surface never crowd each other. */}
-      <main className="flex-1 overflow-hidden p-1.5">
-        <div className="h-full overflow-hidden rounded-2xl border border-border bg-background">
-          {/* Chat and wizards stay mounted and are only hidden by CSS: their
-              agent runs stream over IPC into component state, so unmounting
-              them mid-run would drop the stream (and the composer draft) every
-              time the user switches screens. */}
-          <div className={view.kind === 'chat' ? 'h-full' : 'hidden'}>
-            <ChatPanel />
+      <div className="flex min-w-0 flex-1 flex-col">
+        {/* Termius-style session tabs. The strip is also the frameless
+            titlebar's drag surface for the content column (the sidebar drags
+            itself), replacing the old full-width overlay that swallowed
+            clicks along the top edge. */}
+        <SessionTabStrip
+          items={tabItems}
+          onSelect={(serverId) => {
+            const tab = sessionTabs.find((t) => t.serverId === serverId);
+            navigate({ kind: 'server', serverId, tab: tab?.tab ?? 'terminal' });
+          }}
+          onClose={closeSessionTab}
+          onNewSession={() => navigate({ kind: 'dashboard' })}
+        />
+
+        {/* Inset content card — floats with an even gutter (the tab strip
+            provides the top gap) so the frosted rail and the surface never
+            crowd each other. */}
+        <main className="flex-1 overflow-hidden px-1.5 pb-1.5">
+          <div className="h-full overflow-hidden rounded-2xl border border-border bg-background">
+            {/* Chat and wizards stay mounted and are only hidden by CSS: their
+                agent runs stream over IPC into component state, so unmounting
+                them mid-run would drop the stream (and the composer draft)
+                every time the user switches screens. */}
+            <div className={view.kind === 'chat' ? 'h-full' : 'hidden'}>
+              <ChatPanel />
+            </div>
+            <div className={view.kind === 'wizards' ? 'h-full' : 'hidden'}>
+              <WizardsView />
+            </div>
+            {view.kind === 'dashboard' && <DashboardView onNavigate={navigate} />}
+            {view.kind === 'server' && (
+              <ServerPane
+                view={view}
+                onNavigate={navigate}
+                onEditServer={openEditServer}
+              />
+            )}
+            {view.kind === 'settings' && <SettingsView />}
           </div>
-          <div className={view.kind === 'wizards' ? 'h-full' : 'hidden'}>
-            <WizardsView />
-          </div>
-          {view.kind === 'dashboard' && <DashboardView onNavigate={setView} />}
-          {view.kind === 'server' && (
-            <ServerPane
-              view={view}
-              onNavigate={setView}
-              onEditServer={openEditServer}
-            />
-          )}
-          {view.kind === 'settings' && <SettingsView />}
-        </div>
-      </main>
+        </main>
+      </div>
 
       <ServerFormDialog
         open={serverDialogOpen}

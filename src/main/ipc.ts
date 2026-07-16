@@ -1307,7 +1307,7 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
   updater.startAutoChecks();
   ipcMain.handle(IPC.updateState, () => updater.getState());
   ipcMain.handle(IPC.updateCheck, () => updater.check());
-  ipcMain.handle(IPC.updateInstall, () => updater.downloadAndInstall());
+  ipcMain.handle(IPC.updateInstall, () => updater.install());
   ipcMain.handle(IPC.updateOpenReleases, () => updater.openReleasesPage());
 
   // The MCP server never auto-starts: it exposes the user's servers to coding
