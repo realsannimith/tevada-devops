@@ -7,6 +7,7 @@
 import { ConnectionManager } from './connection-manager';
 import {
   DiskUsage,
+  HostInfo,
   ProcessInfo,
   ServerStats,
 } from '../shared/ipc-types';
@@ -28,6 +29,10 @@ const PROBE = [
   'cat /proc/loadavg',
   `echo ${SEP}`,
   'ps -eo user,pid,pcpu,pmem,comm --sort=-pcpu 2>/dev/null | head -n 11',
+  `echo ${SEP}`,
+  // Static hardware facts (cores / vendor / arch). Cheap enough to re-read each
+  // tick, and doing so keeps them correct across a reconnect to a resized box.
+  'echo cores=$(nproc 2>/dev/null); echo arch=$(uname -m 2>/dev/null); grep -m1 "^vendor_id" /proc/cpuinfo 2>/dev/null; grep -m1 "^model name" /proc/cpuinfo 2>/dev/null',
 ].join('; ');
 
 type CpuSample = { total: number; idle: number };
@@ -118,6 +123,35 @@ function parseProcesses(block: string): ProcessInfo[] {
     }));
 }
 
+/** Map a raw CPU vendor_id / model name to a friendly vendor label. */
+function deriveVendor(vendorId: string, modelName: string, arch: string): string {
+  const hay = `${vendorId} ${modelName}`.toLowerCase();
+  if (hay.includes('intel')) return 'Intel';
+  if (hay.includes('amd')) return 'AMD';
+  if (arch.startsWith('aarch') || arch.startsWith('arm')) return 'ARM';
+  // Unknown vendor: show the first token of the model name if we have one.
+  return modelName.trim().split(/\s+/)[0] ?? '';
+}
+
+export function parseHost(block: string): HostInfo | undefined {
+  if (!block) return undefined;
+  let cores = 0;
+  let arch = '';
+  let vendorId = '';
+  let modelName = '';
+  for (const raw of block.split('\n')) {
+    const line = raw.trim();
+    if (line.startsWith('cores=')) cores = Number(line.slice(6)) || 0;
+    else if (line.startsWith('arch=')) arch = line.slice(5).trim();
+    else if (line.startsWith('vendor_id'))
+      vendorId = line.split(':')[1]?.trim() ?? '';
+    else if (line.toLowerCase().startsWith('model name'))
+      modelName = line.split(':')[1]?.trim() ?? '';
+  }
+  if (!cores && !arch) return undefined;
+  return { cores, vendor: deriveVendor(vendorId, modelName, arch), arch };
+}
+
 /**
  * Parse the combined probe output into ServerStats, using the previous CPU/net
  * samples to compute rates. Returns the stats plus the fresh samples to carry
@@ -130,7 +164,8 @@ export function parseStats(
   now: number,
 ): { stats: ServerStats; cpu?: CpuSample; net: NetSample } {
   const sections = raw.split(SEP).map((s) => s.trim());
-  const [cpuBlk, memBlk, dfBlk, netBlk, uptimeBlk, loadBlk, psBlk] = sections;
+  const [cpuBlk, memBlk, dfBlk, netBlk, uptimeBlk, loadBlk, psBlk, hostBlk] =
+    sections;
 
   const cpu = parseCpuLine((cpuBlk || '').split('\n')[0] || '');
   let cpuPct = 0;
@@ -172,6 +207,9 @@ export function parseStats(
     loadAvg,
     topProcesses: parseProcesses(psBlk || ''),
   };
+
+  const host = parseHost(hostBlk || '');
+  if (host) stats.host = host;
 
   return { stats, cpu, net };
 }

@@ -139,6 +139,19 @@ export type ProcessInfo = {
   command: string;
 };
 
+/** Static-ish hardware facts about a server, read from the same monitor probe.
+ *  Doesn't change tick to tick, so the dashboard can show it as the machine's
+ *  spec (e.g. "2 vCPUs, Intel x86_64" / total RAM). */
+export type HostInfo = {
+  /** Logical CPU count (nproc) — the "vCPUs". */
+  cores: number;
+  /** Friendly CPU vendor: "Intel", "AMD", "ARM", or the raw model when
+   *  unknown. Empty string if it couldn't be determined. */
+  vendor: string;
+  /** Machine architecture from `uname -m`, e.g. "x86_64", "aarch64". */
+  arch: string;
+};
+
 export type ServerStats = {
   ts: number;
   cpuPct: number;
@@ -148,6 +161,8 @@ export type ServerStats = {
   uptimeSec: number;
   loadAvg: [number, number, number];
   topProcesses: ProcessInfo[];
+  /** Hardware spec, once the probe has read it. */
+  host?: HostInfo;
 };
 
 // ---------------------------------------------------------------------------

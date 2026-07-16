@@ -30,6 +30,23 @@ function fmtBytes(n: number): string {
   return `${(n / 1024 ** i).toFixed(1)} ${u[i]}`;
 }
 
+/** Total RAM for the spec line. `free` reports a little under the nominal size
+ *  (firmware/kernel reserve), so round to the nearest 0.5 GiB — a 1 GiB box then
+ *  reads "1 GiB" rather than "0.9 GiB". Below 1 GiB, show whole MiB. */
+function fmtRam(totalBytes: number): string {
+  if (totalBytes <= 0) return '—';
+  const gib = totalBytes / 1024 ** 3;
+  if (gib < 1) return `${Math.round(totalBytes / 1024 ** 2)} MiB`;
+  const rounded = Math.round(gib * 2) / 2;
+  return `${rounded} GiB`;
+}
+
+function fmtCpuSpec(host: NonNullable<ServerStats['host']>): string {
+  const cpu = `${host.cores} vCPU${host.cores === 1 ? '' : 's'}`;
+  const model = [host.vendor, host.arch].filter(Boolean).join(' ');
+  return model ? `${cpu}, ${model}` : cpu;
+}
+
 function fmtUptime(sec: number): string {
   const d = Math.floor(sec / 86400);
   const h = Math.floor((sec % 86400) / 3600);
@@ -229,6 +246,7 @@ function ServerDashboardCard({
             Collecting stats…
           </div>
         ) : (
+          <>
           <div className="grid grid-cols-2 gap-3">
             <Metric
               icon={CpuIcon}
@@ -263,6 +281,19 @@ function ServerDashboardCard({
               value={`${latest.topProcesses.length}`}
             />
           </div>
+          {/* Machine spec — the static hardware facts, so the user can see what
+              they're connected to (e.g. "2 vCPUs, Intel x86_64" / total RAM). */}
+          {latest.host && (
+            <div className="mt-3 space-y-1 border-t border-border pt-3">
+              <SpecRow icon={CpuIcon} label="CPU" value={fmtCpuSpec(latest.host)} />
+              <SpecRow
+                icon={MemoryIcon}
+                label="Memory"
+                value={`${fmtRam(latest.mem.totalBytes)} RAM`}
+              />
+            </div>
+          )}
+          </>
         )}
       </div>
     </div>
@@ -319,6 +350,25 @@ function MiniStat({
       <div className="mt-1 text-[13px] font-medium tabular-nums text-foreground">
         {value}
       </div>
+    </div>
+  );
+}
+
+/** A compact "Label: value" hardware spec line (icon + inline text). */
+function SpecRow({
+  icon: Icon,
+  label,
+  value,
+}: {
+  icon: typeof CpuIcon;
+  label: string;
+  value: string;
+}) {
+  return (
+    <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+      <Icon aria-hidden className="size-3.5 shrink-0" />
+      <span className="font-medium text-foreground">{label}:</span>
+      <span className="truncate tabular-nums">{value}</span>
     </div>
   );
 }
