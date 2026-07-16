@@ -1,7 +1,7 @@
 {
   "name": "tevada-devops",
   "productName": "Tevada DevOps",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "AI-powered server management and DevOps automation desktop app",
   "main": ".vite/build/main.js",
   "private": true,
