@@ -375,6 +375,103 @@
     .no-drag {
         -webkit-app-region: no-drag;
     }
+    /* Chromium computes drag regions from layout rectangles and ignores
+       stacking, so anything portaled OVER a drag region (dropdowns, selects,
+       tooltips, dialogs) silently swallows clicks unless it opts out itself.
+       Cover every Radix portal surface here once. */
+    [data-radix-popper-content-wrapper],
+    [data-slot="dialog-overlay"],
+    [data-slot="dialog-content"],
+    [data-slot="alert-dialog-overlay"],
+    [data-slot="alert-dialog-content"] {
+        -webkit-app-region: no-drag;
+    }
+
+    /* --- Motion system ---------------------------------------------------
+       One easing everywhere (expo-out: fast start, soft landing) so entrances
+       feel consistent. Transform/opacity only — nothing that triggers layout. */
+    .view-enter {
+        animation: view-enter 0.22s cubic-bezier(0.16, 1, 0.3, 1) both;
+    }
+    @keyframes view-enter {
+        from {
+            opacity: 0;
+            transform: translateY(4px);
+        }
+        to {
+            opacity: 1;
+            transform: none;
+        }
+    }
+    /* Small elements popping into existence (overlays, swapped icons). */
+    .pop-in {
+        animation: pop-in 0.18s cubic-bezier(0.16, 1, 0.3, 1) both;
+    }
+    @keyframes pop-in {
+        from {
+            opacity: 0;
+            transform: scale(0.94);
+        }
+        to {
+            opacity: 1;
+            transform: none;
+        }
+    }
+    /* Cards/sections sliding up as they appear (summaries, empty states). */
+    .rise-in {
+        animation: rise-in 0.26s cubic-bezier(0.16, 1, 0.3, 1) both;
+    }
+    /* Large card galleries (e.g. the template catalog): skip layout/paint for
+       offscreen cards so scrolling stays smooth with hundreds of rows. The
+       intrinsic size matches the card's min-height to keep the scrollbar
+       stable. */
+    .gallery-card {
+        content-visibility: auto;
+        contain-intrinsic-size: auto 8.5rem;
+    }
+    /* Radix keeps a closing dialog/menu mounted until its exit animation ends.
+       If that animationend is lost (occluded window → throttled renderer),
+       the closed overlay stays forever — an invisible full-screen layer that
+       eats every click. Closed-state portal surfaces must never be
+       interactive; pairing with fill-mode-forwards on the exit keeps a stuck
+       node at its final (transparent) frame instead of snapping back. */
+    [data-state="closed"]:is(
+            [data-slot="dialog-overlay"],
+            [data-slot="dialog-content"],
+            [data-slot="alert-dialog-overlay"],
+            [data-slot="alert-dialog-content"],
+            [data-slot="dropdown-menu-content"],
+            [data-slot="select-content"],
+            [data-slot="tooltip-content"]
+        ) {
+        pointer-events: none !important;
+    }
+    @keyframes rise-in {
+        from {
+            opacity: 0;
+            transform: translateY(8px);
+        }
+        to {
+            opacity: 1;
+            transform: none;
+        }
+    }
+}
+
+/* Accessibility: users who ask for less motion get none of it. */
+@media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+    }
+    /* A frozen spinner reads as "hung", not as reduced motion — keep it. */
+    .animate-spin {
+        animation-duration: 1s !important;
+        animation-iteration-count: infinite !important;
+    }
 }
 
 /* Thin floating pill scrollbar — hidden in the terminal. */

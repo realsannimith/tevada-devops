@@ -51,6 +51,7 @@ import {
   UpdateState,
   MonitorStatsEvent,
   PlaybookMeta,
+  TemplateDeployEvent,
   TemplateMeta,
   Project,
   SaveDatabaseCredentialRequest,
@@ -267,6 +268,16 @@ const easyhost = {
 
   templates: {
     list: (): Promise<TemplateMeta[]> => ipcRenderer.invoke(IPC.templatesList),
+    deploy: (
+      deployId: string,
+      serverId: string,
+      templateId: string,
+    ): Promise<{ deployId: string }> =>
+      ipcRenderer.invoke(IPC.templatesDeploy, { deployId, serverId, templateId }),
+    cancelDeploy: (deployId: string): Promise<{ ok: boolean }> =>
+      ipcRenderer.invoke(IPC.templatesDeployCancel, { deployId }),
+    onDeployEvent: (cb: (e: TemplateDeployEvent) => void) =>
+      on<TemplateDeployEvent>(IPC.evtTemplateDeploy, cb),
   },
 
   artifacts: {

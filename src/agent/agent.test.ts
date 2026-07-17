@@ -65,6 +65,9 @@ describe('buildProviderOptions', () => {
       buildProviderOptions({ ...base, provider: 'openai', modelId: 'gpt-5.4', effort: 'max', thinking: true }),
     ).toEqual({ openai: { reasoningEffort: 'xhigh' } });
     expect(
+      buildProviderOptions({ ...base, provider: 'openai', modelId: 'gpt-5.6', effort: 'max', thinking: true }),
+    ).toEqual({ openai: { reasoningEffort: 'max' } });
+    expect(
       buildProviderOptions({ ...base, provider: 'google', modelId: 'gemini-3.5-flash', effort: 'high', thinking: true }),
     ).toEqual({ google: { thinkingConfig: { thinkingLevel: 'high' } } });
     expect(
@@ -81,6 +84,16 @@ describe('buildProviderOptions', () => {
         store: false,
         include: ['reasoning.encrypted_content'],
         reasoningEffort: 'high',
+        reasoningSummary: 'auto',
+      },
+    });
+    expect(
+      buildProviderOptions({ ...base, provider: 'codex', modelId: 'gpt-5.6-terra', effort: 'max', thinking: true }),
+    ).toEqual({
+      openai: {
+        store: false,
+        include: ['reasoning.encrypted_content'],
+        reasoningEffort: 'max',
         reasoningSummary: 'auto',
       },
     });

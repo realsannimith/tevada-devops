@@ -23,6 +23,7 @@ import {
   ServerProfile,
   ServerSecret,
   ServerWithStatus,
+  TemplateDeployRequest,
   TemplateMeta,
 } from '../shared/ipc-types';
 import * as store from './store';
@@ -74,6 +75,7 @@ import {
   listTemplates,
   processTemplate,
 } from './templates';
+import { TemplateDeployManager } from './template-deploy';
 
 let runCounter = 0;
 let sessionCounter = 0;
@@ -169,6 +171,14 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
     connect: connectServer,
     listConfigs: () => store.listTunnels(),
     emit: (states) => send(IPC.evtTunnelState, states),
+  });
+
+  // Dokploy-style deterministic template deploys (no AI in the loop).
+  const templateDeploys = new TemplateDeployManager({
+    cm,
+    connect: connectServer,
+    getServer: (id) => store.getServer(id),
+    send: (event) => send(IPC.evtTemplateDeploy, event),
   });
 
   // Let github.ts re-push rotated GitHub App tokens to authorized servers in
@@ -970,6 +980,13 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
   // --- app templates (open-source app gallery) ------------------------------
 
   ipcMain.handle(IPC.templatesList, () => listTemplates());
+  ipcMain.handle(IPC.templatesDeploy, (_e, arg: TemplateDeployRequest) =>
+    templateDeploys.start(arg),
+  );
+  ipcMain.handle(
+    IPC.templatesDeployCancel,
+    (_e, arg: { deployId: string }) => templateDeploys.cancel(arg.deployId),
+  );
 
   // --- live log streaming (Deploys + Artifacts tabs) -------------------------
   // Long-lived follow channels. Output arrives as IPC.evtLogData events keyed

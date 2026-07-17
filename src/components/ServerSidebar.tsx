@@ -53,10 +53,15 @@ import {
   FolderOpenIcon,
   FolderPlusIcon,
   Loader2Icon,
+  PencilIcon,
   PinFilledIcon,
+  PinIcon,
   PlusIcon,
   SettingsIcon,
   TerminalIcon,
+  TrashIcon,
+  WifiIcon,
+  WifiOffIcon,
   WizardsIcon,
 } from "@/lib/icons";
 import { cn } from "@/lib/utils";
@@ -226,17 +231,20 @@ export function ServerSidebar({
               <SidebarGlyph icon={EllipsisIcon} variant="chrome" />
             </button>
           </DropdownMenuTrigger>
-          <DropdownMenuContent align="end">
+          <DropdownMenuContent align="end" className="w-48">
             {status === "connected" ? (
               <DropdownMenuItem onClick={() => disconnect(s.id)}>
+                <WifiOffIcon className="size-3.5 text-muted-foreground" />
                 Disconnect
               </DropdownMenuItem>
             ) : (
               <DropdownMenuItem onClick={() => connect(s.id)}>
+                <WifiIcon className="size-3.5 text-muted-foreground" />
                 Connect
               </DropdownMenuItem>
             )}
             <DropdownMenuItem onClick={() => onEditServer(s.id)}>
+              <PencilIcon className="size-3.5 text-muted-foreground" />
               Edit server
             </DropdownMenuItem>
             <DropdownMenuItem
@@ -248,6 +256,7 @@ export function ServerSidebar({
                 })
               }
             >
+              <ChartBarIcon className="size-3.5 text-muted-foreground" />
               Monitoring
             </DropdownMenuItem>
             <DropdownMenuItem
@@ -255,16 +264,21 @@ export function ServerSidebar({
                 onNavigate({ kind: "server", serverId: s.id, tab: "artifacts" })
               }
             >
+              <FolderOpenIcon className="size-3.5 text-muted-foreground" />
               Artifacts
             </DropdownMenuItem>
             <DropdownMenuSeparator />
             {projects.length === 0 ? (
               <DropdownMenuItem onClick={onAddProject}>
+                <FolderPlusIcon className="size-3.5 text-muted-foreground" />
                 New project…
               </DropdownMenuItem>
             ) : (
               <DropdownMenuSub>
-                <DropdownMenuSubTrigger>Projects</DropdownMenuSubTrigger>
+                <DropdownMenuSubTrigger>
+                  <FolderIcon className="size-3.5 text-muted-foreground" />
+                  Projects
+                </DropdownMenuSubTrigger>
                 <DropdownMenuSubContent>
                   <DropdownMenuLabel>In projects</DropdownMenuLabel>
                   {projects.map((p) => (
@@ -291,6 +305,7 @@ export function ServerSidebar({
               variant="destructive"
               onClick={() => setPendingServerDelete(s)}
             >
+              <TrashIcon className="size-3.5" />
               Remove
             </DropdownMenuItem>
           </DropdownMenuContent>
@@ -601,30 +616,70 @@ export function ServerSidebar({
         <span className="text-[10px] font-medium tracking-[0.04em] text-muted-foreground uppercase">
           {projects.length > 0 ? "Projects" : "Servers"}
         </span>
-        <div className="flex items-center gap-1">
-          <button
-            onClick={onAddProject}
-            className="rounded-sm p-0.5 text-muted-foreground/60 transition-colors hover:bg-accent hover:text-foreground"
-            title="New project"
-          >
-            <SidebarGlyph icon={FolderPlusIcon} variant="chrome" />
-          </button>
-          <button
-            onClick={onAddServer}
-            className="rounded-sm p-0.5 text-muted-foreground/60 transition-colors hover:bg-accent hover:text-foreground"
-            title="Add server"
-          >
-            <SidebarGlyph icon={PlusIcon} variant="chrome" />
-          </button>
-        </div>
+        {/* One + with labeled choices beats two lookalike icon buttons — new
+            users couldn't tell "add server" from "new project" apart. */}
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <button
+              className="rounded-sm p-0.5 text-muted-foreground/60 transition-colors hover:bg-accent hover:text-foreground"
+              title="Add server or project"
+              aria-label="Add server or project"
+            >
+              <SidebarGlyph icon={PlusIcon} variant="chrome" />
+            </button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" sideOffset={6} className="w-52">
+            <DropdownMenuItem onSelect={onAddServer} className="gap-2.5">
+              <span className="flex size-6 shrink-0 items-center justify-center rounded-md bg-secondary">
+                <TerminalIcon className="size-3.5 text-muted-foreground" />
+              </span>
+              <div className="min-w-0">
+                <div className="text-xs font-medium tracking-[-0.01em] text-ink">
+                  Add server
+                </div>
+                <div className="text-[10px] text-muted-foreground">
+                  Connect a VPS over SSH
+                </div>
+              </div>
+            </DropdownMenuItem>
+            <DropdownMenuItem onSelect={onAddProject} className="gap-2.5">
+              <span className="flex size-6 shrink-0 items-center justify-center rounded-md bg-secondary">
+                <FolderPlusIcon className="size-3.5 text-muted-foreground" />
+              </span>
+              <div className="min-w-0">
+                <div className="text-xs font-medium tracking-[-0.01em] text-ink">
+                  New project
+                </div>
+                <div className="text-[10px] text-muted-foreground">
+                  Group servers, chats & memory
+                </div>
+              </div>
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
       </div>
 
       <div className="no-drag flex-1 space-y-0.5 overflow-y-auto px-2 pb-2">
         {servers.length === 0 && projects.length === 0 && (
-          <p className="px-2 py-3 text-[11px] leading-relaxed text-muted-foreground">
-            No servers yet. Click + to add one, or the folder to group them into
-            a project.
-          </p>
+          <div className="grid gap-1.5 px-2 py-3">
+            <p className="text-[11px] leading-relaxed text-muted-foreground">
+              No servers yet.
+            </p>
+            <button
+              onClick={onAddServer}
+              className="flex items-center gap-2 rounded-md border border-dashed border-border px-2 py-1.5 text-left text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+            >
+              <PlusIcon className="size-3.5 shrink-0" />
+              Add your first server
+            </button>
+            <button
+              onClick={onAddProject}
+              className="flex items-center gap-2 rounded-md border border-dashed border-border px-2 py-1.5 text-left text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+            >
+              <FolderPlusIcon className="size-3.5 shrink-0" />
+              New project
+            </button>
+          </div>
         )}
 
         {projects.map((project) => {
@@ -807,15 +862,18 @@ function ProjectHeader({
             <SidebarGlyph icon={EllipsisIcon} variant="chrome" />
           </button>
         </DropdownMenuTrigger>
-        <DropdownMenuContent align="end">
+        <DropdownMenuContent align="end" className="w-48">
           <DropdownMenuItem onClick={onNewChat}>
+            <ChatBubbleIcon className="size-3.5 text-muted-foreground" />
             New chat in project
           </DropdownMenuItem>
           <DropdownMenuItem onClick={onEdit}>
+            <PencilIcon className="size-3.5 text-muted-foreground" />
             Edit project &amp; memory
           </DropdownMenuItem>
           <DropdownMenuSeparator />
           <DropdownMenuItem variant="destructive" onClick={onDelete}>
+            <TrashIcon className="size-3.5" />
             Delete project
           </DropdownMenuItem>
         </DropdownMenuContent>
@@ -910,14 +968,23 @@ function HistoryRow({
             renameRequested.current = true;
           }}
         >
+          <PencilIcon className="size-3.5 text-muted-foreground" />
           Rename
         </DropdownMenuItem>
         <DropdownMenuItem onClick={(event) => onTogglePin(event)}>
+          {summary.pinned ? (
+            <PinFilledIcon className="size-3.5 text-muted-foreground" />
+          ) : (
+            <PinIcon className="size-3.5 text-muted-foreground" />
+          )}
           {summary.pinned ? "Unpin" : "Pin"}
         </DropdownMenuItem>
         {projects.length > 0 && (
           <DropdownMenuSub>
-            <DropdownMenuSubTrigger>Move to project</DropdownMenuSubTrigger>
+            <DropdownMenuSubTrigger>
+              <FolderIcon className="size-3.5 text-muted-foreground" />
+              Move to project
+            </DropdownMenuSubTrigger>
             <DropdownMenuSubContent>
               <DropdownMenuCheckboxItem
                 checked={!summary.projectId}
@@ -940,6 +1007,7 @@ function HistoryRow({
         )}
         <DropdownMenuSeparator />
         <DropdownMenuItem variant="destructive" onClick={onDelete}>
+          <TrashIcon className="size-3.5" />
           Delete
         </DropdownMenuItem>
       </DropdownMenuContent>

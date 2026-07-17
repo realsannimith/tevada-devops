@@ -366,6 +366,38 @@ export function ChatPanel() {
   const removeAttachment = (id: string) =>
     setAttachments((prev) => prev.filter((a) => a.id !== id));
 
+  // Whole-panel drag-and-drop. dragenter/dragleave fire for every child the
+  // cursor crosses, so a depth counter tells "left the panel" apart from
+  // "moved between children" — the overlay only hides at depth zero.
+  const [draggingFiles, setDraggingFiles] = useState(false);
+  const dragDepth = useRef(0);
+
+  function handleDragEnter(e: React.DragEvent) {
+    if (!e.dataTransfer.types.includes('Files')) return;
+    e.preventDefault();
+    dragDepth.current += 1;
+    setDraggingFiles(true);
+  }
+
+  function handleDragOver(e: React.DragEvent) {
+    if (e.dataTransfer.types.includes('Files')) e.preventDefault();
+  }
+
+  function handleDragLeave(e: React.DragEvent) {
+    if (!e.dataTransfer.types.includes('Files')) return;
+    dragDepth.current = Math.max(0, dragDepth.current - 1);
+    if (dragDepth.current === 0) setDraggingFiles(false);
+  }
+
+  function handleDrop(e: React.DragEvent) {
+    dragDepth.current = 0;
+    setDraggingFiles(false);
+    if (e.dataTransfer.files.length) {
+      e.preventDefault();
+      void addFiles(e.dataTransfer.files);
+    }
+  }
+
   /** Start a fresh run for a turn (text + attachments), from the current feed. */
   async function dispatchTurn(turn: { text: string; attachments: ChatAttachment[] }) {
     statusRef.current = null; // the run's own lifecycle takes over from here
@@ -561,18 +593,9 @@ export function ChatPanel() {
         }}
       />
 
-      <div
-        className="composer overflow-hidden"
-        onDragOver={(e) => {
-          if (e.dataTransfer.types.includes('Files')) e.preventDefault();
-        }}
-        onDrop={(e) => {
-          if (e.dataTransfer.files.length) {
-            e.preventDefault();
-            void addFiles(e.dataTransfer.files);
-          }
-        }}
-      >
+      {/* Drops are handled once at the panel root — a handler here too would
+          stage every dropped file twice as the event bubbles. */}
+      <div className="composer overflow-hidden">
         {attachments.length > 0 && (
           <div className="flex flex-wrap gap-2 px-3 pt-2.5">
             {attachments.map((att) => (
@@ -668,7 +691,26 @@ export function ChatPanel() {
   );
 
   return (
-    <div className="flex h-full flex-col bg-background">
+    <div
+      className="relative flex h-full flex-col bg-background"
+      onDragEnter={handleDragEnter}
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+    >
+      {draggingFiles && (
+        <div className="pointer-events-none absolute inset-0 z-50 flex animate-in bg-background/80 p-4 backdrop-blur-[2px] duration-150 fade-in-0">
+          <div className="pop-in flex flex-1 flex-col items-center justify-center gap-2 rounded-2xl border-2 border-dashed border-primary/50 bg-primary/5">
+            <span className="flex size-10 items-center justify-center rounded-xl bg-primary/10 text-primary">
+              <PaperclipIcon aria-hidden className="size-5" />
+            </span>
+            <p className="text-sm font-medium text-ink">Drop files to attach</p>
+            <p className="text-[11px] text-muted-foreground">
+              Images and text files · up to {ATTACHMENT_LIMITS.maxCount} files
+            </p>
+          </div>
+        </div>
+      )}
       <header className="chat-surface-divider flex shrink-0 items-center justify-between px-5 py-3">
         <div className="flex items-center gap-2.5">
           <img

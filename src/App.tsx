@@ -16,7 +16,6 @@ import { MonitoringView } from '@/components/MonitoringView';
 import { ArtifactsView } from '@/components/ArtifactsView';
 import { DeploymentsView } from '@/components/DeploymentsView';
 import { TunnelsView } from '@/components/TunnelsView';
-import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Button } from '@/components/ui/button';
 import {
   AlertTriangleIcon,
@@ -35,6 +34,15 @@ export type ServerTab =
   | 'artifacts'
   | 'deploys'
   | 'tunnels';
+
+const SERVER_TAB_ITEMS: { value: ServerTab; label: string }[] = [
+  { value: 'terminal', label: 'Terminal' },
+  { value: 'files', label: 'Files' },
+  { value: 'monitoring', label: 'Monitoring' },
+  { value: 'artifacts', label: 'Artifacts' },
+  { value: 'deploys', label: 'Deploys' },
+  { value: 'tunnels', label: 'Tunnels' },
+];
 
 export type View =
   | { kind: 'server'; serverId: string; tab: ServerTab }
@@ -184,15 +192,25 @@ function Shell() {
             <div className={view.kind === 'wizards' ? 'h-full' : 'hidden'}>
               <WizardsView />
             </div>
-            {view.kind === 'dashboard' && <DashboardView onNavigate={navigate} />}
-            {view.kind === 'server' && (
-              <ServerPane
-                view={view}
-                onNavigate={navigate}
-                onEditServer={openEditServer}
-              />
+            {view.kind === 'dashboard' && (
+              <div className="view-enter h-full">
+                <DashboardView onNavigate={navigate} />
+              </div>
             )}
-            {view.kind === 'settings' && <SettingsView />}
+            {view.kind === 'server' && (
+              <div key={view.serverId} className="view-enter h-full">
+                <ServerPane
+                  view={view}
+                  onNavigate={navigate}
+                  onEditServer={openEditServer}
+                />
+              </div>
+            )}
+            {view.kind === 'settings' && (
+              <div className="view-enter h-full">
+                <SettingsView />
+              </div>
+            )}
           </div>
         </main>
       </div>
@@ -207,6 +225,7 @@ function Shell() {
         open={projectDialogOpen}
         onOpenChange={setProjectDialogOpen}
         project={editingProject}
+        onAddServer={openAddServer}
       />
     </div>
   );
@@ -236,7 +255,7 @@ function ServerPane({
 
   return (
     <div className="flex h-full flex-col">
-      <header className="flex items-center justify-between border-b border-border px-5 py-3">
+      <header className="flex items-center justify-between px-5 py-3">
         <div className="flex items-center gap-2.5">
           <div>
             <div className="flex items-center gap-2">
@@ -265,25 +284,6 @@ function ServerPane({
           </div>
         </div>
         <div className="flex items-center gap-2.5">
-          <Tabs
-            value={view.tab}
-            onValueChange={(t) =>
-              onNavigate({
-                kind: 'server',
-                serverId: server.id,
-                tab: t as ServerTab,
-              })
-            }
-          >
-            <TabsList>
-              <TabsTrigger value="terminal">Terminal</TabsTrigger>
-              <TabsTrigger value="files">Files</TabsTrigger>
-              <TabsTrigger value="monitoring">Monitoring</TabsTrigger>
-              <TabsTrigger value="artifacts">Artifacts</TabsTrigger>
-              <TabsTrigger value="deploys">Deploys</TabsTrigger>
-              <TabsTrigger value="tunnels">Tunnels</TabsTrigger>
-            </TabsList>
-          </Tabs>
           {connected ? (
             <Button
               variant="outline"
@@ -305,20 +305,48 @@ function ServerPane({
         </div>
       </header>
 
+      {/* Underline tab row (the header's divider doubles as its baseline) —
+          full-width with a 2px accent on the active tab, instead of the old
+          pill TabsList squeezed into the header. */}
+      <nav role="tablist" className="flex shrink-0 gap-1 border-b border-border px-3">
+        {SERVER_TAB_ITEMS.map(({ value, label }) => (
+          <button
+            key={value}
+            type="button"
+            role="tab"
+            aria-selected={view.tab === value}
+            onClick={() =>
+              onNavigate({ kind: 'server', serverId: server.id, tab: value })
+            }
+            className={cn(
+              '-mb-px border-b-2 px-2.5 py-2 text-xs transition-colors',
+              view.tab === value
+                ? 'border-primary text-ink'
+                : 'border-transparent text-muted-foreground hover:text-ink',
+            )}
+          >
+            {label}
+          </button>
+        ))}
+      </nav>
+
       <div className="flex-1 overflow-hidden">
-        {view.tab === 'terminal' ? (
-          <TerminalView serverId={server.id} />
-        ) : view.tab === 'files' ? (
-          <FilesView serverId={server.id} />
-        ) : view.tab === 'monitoring' ? (
-          <MonitoringView serverId={server.id} />
-        ) : view.tab === 'deploys' ? (
-          <DeploymentsView serverId={server.id} onNavigate={onNavigate} />
-        ) : view.tab === 'tunnels' ? (
-          <TunnelsView serverId={server.id} />
-        ) : (
-          <ArtifactsView serverId={server.id} onNavigate={onNavigate} />
-        )}
+        {/* Keyed so each tab switch replays the soft entrance. */}
+        <div key={view.tab} className="view-enter h-full">
+          {view.tab === 'terminal' ? (
+            <TerminalView serverId={server.id} />
+          ) : view.tab === 'files' ? (
+            <FilesView serverId={server.id} />
+          ) : view.tab === 'monitoring' ? (
+            <MonitoringView serverId={server.id} />
+          ) : view.tab === 'deploys' ? (
+            <DeploymentsView serverId={server.id} onNavigate={onNavigate} />
+          ) : view.tab === 'tunnels' ? (
+            <TunnelsView serverId={server.id} />
+          ) : (
+            <ArtifactsView serverId={server.id} onNavigate={onNavigate} />
+          )}
+        </div>
       </div>
     </div>
   );

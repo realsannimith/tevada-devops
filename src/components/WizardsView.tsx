@@ -32,19 +32,35 @@ import {
 import { publishRunStatus } from '@/lib/runStatus';
 import {
   ArrowLeftIcon,
+  CheckIcon,
+  CircleCheckFilledIcon,
+  CopyIcon,
   DeviceLaptopIcon,
+  ExternalLinkIcon,
+  EyeIcon,
+  EyeOffIcon,
+  Loader2Icon,
   PlayIcon,
   WifiIcon,
   WizardsIcon,
+  XIcon,
   type AppIcon,
 } from '@/lib/icons';
 import { cn } from '@/lib/utils';
+import {
+  buildDeployTranscript,
+  TEMPLATE_DEPLOY_STEPS,
+} from '@/lib/templateDeployTranscript';
 import type {
   ChatHistoryState,
   ChatSession,
   ChatSessionStatus,
+  ChatTextHistoryItem,
   PlaybookInput,
   PlaybookMeta,
+  TemplateDeployStepId,
+  TemplateDeployStepStatus,
+  TemplateDeploySummary,
   TemplateMeta,
 } from '@/shared/ipc-types';
 
@@ -80,6 +96,40 @@ function templateAsPlaybook(t: TemplateMeta): PlaybookMeta {
     description: t.description,
     inputs: [],
   };
+}
+
+/** Renderer-side mirror of one deterministic deploy (live or just finished). */
+type ActiveDeploy = {
+  deployId: string;
+  sessionId: string;
+  template: TemplateMeta;
+  serverId: string;
+  serverName: string;
+  createdAt: number;
+  steps: Partial<
+    Record<TemplateDeployStepId, { status: TemplateDeployStepStatus; detail?: string }>
+  >;
+  log: string[];
+  summary: TemplateDeploySummary | null;
+  error: string | null;
+  status: ChatSessionStatus;
+};
+
+function deployAsHistoryItems(deploy: ActiveDeploy): ChatTextHistoryItem[] {
+  return [
+    {
+      kind: 'text',
+      id: `${deploy.deployId}-echo`,
+      role: 'user',
+      content: `Deploy app template "${deploy.template.name}" (${deploy.template.version}) on ${deploy.serverName}.`,
+    },
+    {
+      kind: 'text',
+      id: `${deploy.deployId}-report`,
+      role: 'assistant',
+      content: buildDeployTranscript(deploy),
+    },
+  ];
 }
 
 /** Registry-hosted app logo with a quiet glyph fallback when the image is
@@ -182,6 +232,11 @@ export function WizardsView() {
   feedRef.current = feed;
   const activeRunRef = useRef(activeRun);
   activeRunRef.current = activeRun;
+  // Deterministic template deploy (Dokploy-style; no agent run involved).
+  const [deploy, setDeploy] = useState<ActiveDeploy | null>(null);
+  const deployRef = useRef(deploy);
+  deployRef.current = deploy;
+  const deploying = deploy?.status === 'running';
 
   useEffect(() => {
     window.easyhost.playbooks.list().then(setPlaybooks).catch(() => {});
@@ -190,8 +245,58 @@ export function WizardsView() {
 
   // Keep the sidebar's "Wizards" running indicator in sync from any screen.
   useEffect(() => {
-    publishRunStatus('wizard', running);
-  }, [running]);
+    publishRunStatus('wizard', running || deploying);
+  }, [running, deploying]);
+
+  // Stream of deterministic-deploy progress from main. Every state change is
+  // also persisted so History always has the run, even after a crash.
+  useEffect(() => {
+    const unsubscribe = window.easyhost.templates.onDeployEvent((event) => {
+      const current = deployRef.current;
+      if (!current || event.deployId !== current.deployId) return;
+      setDeploy((prev) => {
+        if (!prev || event.deployId !== prev.deployId) return prev;
+        let next: ActiveDeploy = prev;
+        if (event.type === 'step') {
+          next = {
+            ...prev,
+            steps: {
+              ...prev.steps,
+              [event.step]: { status: event.status, detail: event.detail },
+            },
+          };
+        } else if (event.type === 'log') {
+          next = { ...prev, log: [...prev.log, event.text].slice(-500) };
+        } else if (event.type === 'done') {
+          next = { ...prev, summary: event.summary, status: 'done' };
+        } else if (event.type === 'error') {
+          next = { ...prev, error: event.error, status: 'error' };
+        } else if (event.type === 'cancelled') {
+          next = { ...prev, status: 'cancelled' };
+        }
+        if (event.type !== 'log') persistDeploy(next);
+        return next;
+      });
+    });
+    return unsubscribe;
+  }, []);
+
+  function persistDeploy(d: ActiveDeploy) {
+    void window.easyhost.chatHistory
+      .upsert({
+        id: d.sessionId,
+        kind: 'wizard',
+        title: d.template.name,
+        playbookId: `${TEMPLATE_PLAYBOOK_PREFIX}${d.template.id}`,
+        status: d.status,
+        items: deployAsHistoryItems(d),
+        targetServerId: d.serverId,
+        createdAt: d.createdAt,
+        updatedAt: Date.now(),
+      })
+      .then(broadcastHistory)
+      .catch(() => {});
+  }
 
   // Mirror the persisted wizard runs (this window's saves included) so cards
   // and the header can show last-run outcomes, surviving app restarts.
@@ -450,7 +555,61 @@ export function WizardsView() {
     selected?.inputs.some((i) => i.required && !values[i.key]?.trim()) ?? false;
 
   async function run() {
-    if (!selected || !serverId || running) return;
+    if (
+      !selected ||
+      !serverId ||
+      running ||
+      deployRef.current?.status === 'running'
+    ) {
+      return;
+    }
+    const serverName =
+      servers.find((s) => s.id === serverId)?.name ?? 'the target server';
+    if (selectedTemplate) {
+      // Dokploy-style deterministic deploy — main drives the whole pipeline;
+      // no agent run is started.
+      const sessionId = newChatSessionId();
+      sessionIdRef.current = sessionId;
+      setActiveRun(null);
+      setLoadedStatus(null);
+      replaceFeed([]);
+      const deployId = `template_${crypto.randomUUID()}`;
+      const fresh: ActiveDeploy = {
+        deployId,
+        sessionId,
+        template: selectedTemplate,
+        serverId,
+        serverName,
+        createdAt: Date.now(),
+        steps: {},
+        log: [],
+        summary: null,
+        error: null,
+        status: 'running',
+      };
+      // Set the ref before invoking main: the deploy emits its first progress
+      // event synchronously, before React could commit a state update.
+      deployRef.current = fresh;
+      setDeploy(fresh);
+      persistDeploy(fresh);
+      try {
+        await window.easyhost.templates.deploy(
+          deployId,
+          serverId,
+          selectedTemplate.id,
+        );
+      } catch (err) {
+        const failed: ActiveDeploy = {
+          ...fresh,
+          status: 'error',
+          error: err instanceof Error ? err.message : String(err),
+        };
+        deployRef.current = failed;
+        setDeploy(failed);
+        persistDeploy(failed);
+      }
+      return;
+    }
     const runMeta: ActiveWizardRun = {
       sessionId: newChatSessionId(),
       playbook: selected,
@@ -461,19 +620,6 @@ export function WizardsView() {
     setActiveRun(runMeta);
     setLoadedStatus(null);
     replaceFeed([]);
-    const serverName =
-      servers.find((s) => s.id === serverId)?.name ?? 'the target server';
-    if (selectedTemplate) {
-      await start(
-        {
-          messages: [],
-          serverIds: [serverId],
-          templateId: selectedTemplate.id,
-        },
-        `Deploy app template "${selectedTemplate.name}" (${selectedTemplate.version}) on ${serverName}.`,
-      );
-      return;
-    }
     await start(
       {
         messages: [],
@@ -485,13 +631,26 @@ export function WizardsView() {
     );
   }
 
+  /** The deterministic deploy the open template screen should show live: the
+   *  session on screen is the deploy's own. A deploy keeps running in main
+   *  even when the user navigates away; this only controls what's rendered. */
+  const activeTemplateDeploy =
+    selectedTemplate &&
+    deploy &&
+    deploy.template.id === selectedTemplate.id &&
+    sessionIdRef.current === deploy.sessionId
+      ? deploy
+      : null;
+
   /** Live status of what the feed is showing (running run, finished run, or a
    *  transcript loaded from History). */
-  const feedStatus: ChatSessionStatus | null = running
-    ? 'running'
-    : activeRun
-      ? outcome ?? null
-      : loadedStatus;
+  const feedStatus: ChatSessionStatus | null = activeTemplateDeploy
+    ? activeTemplateDeploy.status
+    : running
+      ? 'running'
+      : activeRun
+        ? outcome ?? null
+        : loadedStatus;
 
   if (!selected) {
     return (
@@ -558,8 +717,8 @@ export function WizardsView() {
                 Deploy an open-source app
               </h2>
               <p className="mt-0.5 text-[11px] text-muted-foreground">
-                One-click Docker Compose deploys — passwords and hostnames are
-                generated for you.
+                One-click Docker Compose deploys, run directly by the app —
+                passwords and hostnames are generated for you.
               </p>
             </div>
             <Input
@@ -610,33 +769,44 @@ export function WizardsView() {
                   <button
                     key={t.id}
                     onClick={() => choose(templateAsPlaybook(t), t)}
-                    className="surface-panel group flex flex-col p-4 text-left transition-colors hover:border-skill/35"
+                    className="surface-panel gallery-card group flex min-h-[8.5rem] flex-col p-4 text-left transition-[transform,border-color] hover:-translate-y-px hover:border-skill/35"
                   >
-                    <div className="mb-3 flex items-center gap-2.5">
-                      <TemplateLogo template={t} className="size-8 shrink-0" />
+                    <div className="mb-3 flex items-center gap-3">
+                      <span className="flex size-9 shrink-0 items-center justify-center overflow-hidden rounded-xl border border-border bg-secondary/60 p-1">
+                        <TemplateLogo template={t} className="size-full" />
+                      </span>
                       <div className="min-w-0 flex-1">
                         <h3 className="truncate text-[13px] font-semibold tracking-[-0.015em] text-ink">
                           {t.name}
                         </h3>
-                        <p className="truncate text-[10px] text-muted-foreground">
-                          {t.version}
+                        <p className="truncate font-mono text-[10px] text-muted-foreground/70">
+                          v{t.version.replace(/^v/i, '')}
                         </p>
                       </div>
+                      <PlayIcon className="size-3.5 shrink-0 text-muted-foreground/0 transition-colors group-hover:text-muted-foreground" />
                     </div>
-                    <p className="line-clamp-2 text-xs leading-relaxed text-muted-foreground">
+                    <p
+                      className="line-clamp-2 text-xs leading-relaxed text-muted-foreground"
+                      title={t.description}
+                    >
                       {t.description}
                     </p>
-                    <div className="mt-auto flex items-center gap-1.5 pt-2">
+                    <div className="mt-auto flex items-center gap-1.5 pt-2.5">
                       {t.tags.slice(0, 3).map((tag) => (
                         <span
                           key={tag}
-                          className="rounded-full bg-secondary px-2 py-0.5 text-[10px] text-muted-foreground"
+                          className="max-w-24 truncate rounded-full border border-border/60 bg-secondary px-2 py-0.5 text-[10px] text-muted-foreground"
                         >
                           {tag}
                         </span>
                       ))}
+                      {t.tags.length > 3 && (
+                        <span className="text-[10px] text-muted-foreground/60">
+                          +{t.tags.length - 3}
+                        </span>
+                      )}
                       {cardStatus && (
-                        <span className="ml-auto">
+                        <span className="ml-auto shrink-0">
                           <SessionStatusChip status={cardStatus} />
                         </span>
                       )}
@@ -684,13 +854,21 @@ export function WizardsView() {
             {selected.description}
           </p>
         </div>
-        {running ? (
+        {running || activeTemplateDeploy?.status === 'running' ? (
           <Button
             variant="prominent"
             size="icon-xs"
             className="size-7 shrink-0 rounded-full sm:size-[26px]"
-            onClick={cancel}
-            aria-label="Stop wizard"
+            onClick={() => {
+              if (activeTemplateDeploy?.status === 'running') {
+                void window.easyhost.templates.cancelDeploy(
+                  activeTemplateDeploy.deployId,
+                );
+              } else {
+                void cancel();
+              }
+            }}
+            aria-label={selectedTemplate ? 'Stop deploy' : 'Stop wizard'}
           >
             <span
               aria-hidden="true"
@@ -703,10 +881,10 @@ export function WizardsView() {
             size="sm"
             className="hidden shrink-0 rounded-full px-4 sm:inline-flex"
             onClick={run}
-            disabled={!serverId || requiredMissing}
+            disabled={!serverId || requiredMissing || deploying}
           >
             <PlayIcon className="size-3.5" />
-            Run wizard
+            {selectedTemplate ? 'Deploy' : 'Run wizard'}
           </Button>
         )}
       </header>
@@ -765,9 +943,10 @@ export function WizardsView() {
                   )}
                   <p className="text-[11px] leading-relaxed text-muted-foreground">
                     No configuration needed — passwords and hostnames are
-                    generated automatically. The agent installs Docker if
-                    missing, deploys with Docker Compose, and reports the URL
-                    and credentials when done.
+                    generated automatically. The app deploys directly with
+                    Docker Compose (installing Docker first if missing), the
+                    same fixed steps every time, and shows the URL and
+                    credentials when done.
                   </p>
                   <div className="flex flex-wrap gap-3">
                     {(
@@ -797,45 +976,272 @@ export function WizardsView() {
           </div>
 
           <div className="chat-surface-divider shrink-0 p-4 sm:hidden">
-            {running ? (
+            {running || activeTemplateDeploy?.status === 'running' ? (
               <Button
                 variant="prominent"
                 className="h-9 w-full rounded-full"
-                onClick={cancel}
+                onClick={() => {
+                  if (activeTemplateDeploy?.status === 'running') {
+                    void window.easyhost.templates.cancelDeploy(
+                      activeTemplateDeploy.deployId,
+                    );
+                  } else {
+                    void cancel();
+                  }
+                }}
               >
                 <span
                   aria-hidden="true"
                   className="mr-2 inline-block size-2 rounded-[2px] bg-current"
                 />
-                Stop wizard
+                {selectedTemplate ? 'Stop deploy' : 'Stop wizard'}
               </Button>
             ) : (
               <Button
                 variant="prominent"
                 className="h-9 w-full rounded-full"
                 onClick={run}
-                disabled={!serverId || requiredMissing}
+                disabled={!serverId || requiredMissing || deploying}
               >
                 <PlayIcon className="size-3.5" />
-                Run wizard
+                {selectedTemplate ? 'Deploy' : 'Run wizard'}
               </Button>
             )}
           </div>
         </aside>
 
         <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
-          <AgentFeed
-            feed={feed}
-            error={error}
-            approval={approval}
-            onApprove={respondApproval}
-            onSubmitForm={respondForm}
-            running={running}
-            tokens={tokens}
-            emptyMessage="Configure the wizard on the left, then run it. Output streams here."
-          />
+          {activeTemplateDeploy ? (
+            <TemplateDeployPanel deploy={activeTemplateDeploy} />
+          ) : (
+            <AgentFeed
+              feed={feed}
+              error={error}
+              approval={approval}
+              onApprove={respondApproval}
+              onSubmitForm={respondForm}
+              running={running}
+              tokens={tokens}
+              emptyMessage={
+                selectedTemplate
+                  ? 'Pick a server on the left, then Deploy. Progress streams here — no AI involved, the app runs the same steps every time.'
+                  : 'Configure the wizard on the left, then run it. Output streams here.'
+              }
+            />
+          )}
         </div>
       </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Deterministic deploy panel (Dokploy-style progress, log, and summary)
+// ---------------------------------------------------------------------------
+
+function TemplateDeployPanel({ deploy }: { deploy: ActiveDeploy }) {
+  const logRef = useRef<HTMLPreElement | null>(null);
+  // Follow the log tail while the deploy streams.
+  useEffect(() => {
+    const el = logRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [deploy.log.length]);
+
+  return (
+    <div className="h-full overflow-y-auto">
+      <div className="mx-auto max-w-2xl space-y-4 p-4 sm:p-6">
+        {/* Step checklist */}
+        <div className="surface-panel divide-y divide-border">
+          {TEMPLATE_DEPLOY_STEPS.map((s) => {
+            const st = deploy.steps[s.id];
+            return (
+              <div key={s.id} className="flex items-center gap-3 px-4 py-2.5">
+                <DeployStepIcon status={st?.status} />
+                <span
+                  className={cn(
+                    'text-[13px] tracking-[-0.015em]',
+                    st ? 'text-ink' : 'text-muted-foreground/60',
+                  )}
+                >
+                  {s.label}
+                </span>
+                {st?.detail && (
+                  <span className="ml-auto min-w-0 truncate text-[11px] text-muted-foreground">
+                    {st.detail}
+                  </span>
+                )}
+              </div>
+            );
+          })}
+        </div>
+
+        {deploy.error && (
+          <p className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs leading-relaxed text-destructive">
+            {deploy.error}
+          </p>
+        )}
+        {deploy.status === 'cancelled' && (
+          <p className="rounded-lg border border-border bg-secondary px-3 py-2 text-xs text-muted-foreground">
+            Deploy stopped. Files already written stay on the server under the
+            app directory; deploying again starts a fresh copy.
+          </p>
+        )}
+
+        {/* Summary — the payoff card */}
+        {deploy.summary && (
+          <DeploySummaryCard summary={deploy.summary} />
+        )}
+
+        {/* Live log */}
+        {deploy.log.length > 0 && (
+          <div className="surface-panel overflow-hidden">
+            <div className="flex items-center justify-between border-b border-border bg-secondary/40 px-4 py-1.5">
+              <span className="text-[10px] font-medium tracking-wide text-muted-foreground uppercase">
+                Deploy log
+              </span>
+              {deploy.status === 'running' && (
+                <Loader2Icon className="size-3 animate-spin text-muted-foreground" />
+              )}
+            </div>
+            <pre
+              ref={logRef}
+              className="max-h-72 overflow-y-auto px-4 py-3 font-mono text-[11px] leading-relaxed break-words whitespace-pre-wrap text-muted-foreground"
+            >
+              {deploy.log.join('\n')}
+            </pre>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function DeployStepIcon({ status }: { status?: TemplateDeployStepStatus }) {
+  if (status === 'running') {
+    return <Loader2Icon className="size-4 shrink-0 animate-spin text-primary" />;
+  }
+  if (status === 'done') {
+    return (
+      <CircleCheckFilledIcon className="pop-in size-4 shrink-0 text-[var(--success)]" />
+    );
+  }
+  if (status === 'failed') {
+    return <XIcon className="pop-in size-4 shrink-0 text-destructive" />;
+  }
+  if (status === 'skipped') {
+    return (
+      <span className="flex size-4 shrink-0 items-center justify-center text-muted-foreground/60">
+        –
+      </span>
+    );
+  }
+  return (
+    <span className="size-4 shrink-0 p-0.5">
+      <span className="block size-3 rounded-full border-[1.5px] border-border" />
+    </span>
+  );
+}
+
+function DeploySummaryCard({ summary }: { summary: TemplateDeploySummary }) {
+  return (
+    <div className="surface-panel rise-in p-4">
+      <div className="flex items-center gap-2">
+        <CircleCheckFilledIcon className="size-4 shrink-0 text-[var(--success)]" />
+        <h3 className="text-[13px] font-semibold tracking-[-0.015em] text-ink">
+          App deployed
+        </h3>
+        <span className="ml-auto font-mono text-[10px] text-muted-foreground">
+          {summary.appDir}
+        </span>
+      </div>
+
+      {summary.urls.length > 0 && (
+        <div className="mt-3 space-y-1.5">
+          {summary.urls.map((u) => (
+            <a
+              key={`${u.serviceName}-${u.url}`}
+              href={u.url}
+              target="_blank"
+              rel="noreferrer"
+              className="flex items-center gap-2 rounded-lg border border-border bg-secondary px-3 py-2 transition-colors hover:bg-accent"
+            >
+              <ExternalLinkIcon className="size-3.5 shrink-0 text-muted-foreground" />
+              <span className="min-w-0 flex-1 truncate text-xs font-medium text-ink">
+                {u.url}
+              </span>
+              <span className="shrink-0 text-[10px] text-muted-foreground">
+                {u.serviceName}
+              </span>
+            </a>
+          ))}
+        </div>
+      )}
+
+      {summary.credentials.length > 0 && (
+        <div className="mt-4">
+          <p className="mb-2 text-[10px] font-medium tracking-wide text-muted-foreground uppercase">
+            Generated credentials — stored only in the protected server .env;
+            copy them now because History keeps only the variable names
+          </p>
+          <div className="divide-y divide-border overflow-hidden rounded-lg border border-border">
+            {summary.credentials.map((c) => (
+              <CredentialRow key={c.key} name={c.key} value={c.value} />
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Values that look secret start masked; anything can be revealed and copied. */
+function CredentialRow({ name, value }: { name: string; value: string }) {
+  const secret = /pass|secret|key|token|jwt/i.test(name);
+  const [revealed, setRevealed] = useState(!secret);
+  const [copied, setCopied] = useState(false);
+  return (
+    <div className="flex items-center gap-2 px-3 py-1.5">
+      <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-muted-foreground">
+        {name}
+      </span>
+      <span className="min-w-0 flex-1 truncate text-right font-mono text-[11px] text-ink">
+        {revealed ? value : '••••••••'}
+      </span>
+      {secret && (
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon-sm"
+          className="size-6 shrink-0 text-muted-foreground"
+          onClick={() => setRevealed((r) => !r)}
+          aria-label={revealed ? `Hide ${name}` : `Show ${name}`}
+        >
+          {revealed ? (
+            <EyeOffIcon className="size-3.5" />
+          ) : (
+            <EyeIcon className="size-3.5" />
+          )}
+        </Button>
+      )}
+      <Button
+        type="button"
+        variant="ghost"
+        size="icon-sm"
+        className="size-6 shrink-0 text-muted-foreground"
+        onClick={() => {
+          void navigator.clipboard.writeText(value).then(() => {
+            setCopied(true);
+            window.setTimeout(() => setCopied(false), 1500);
+          });
+        }}
+        aria-label={`Copy ${name}`}
+      >
+        {copied ? (
+          <CheckIcon className="size-3.5 text-[var(--success)]" />
+        ) : (
+          <CopyIcon className="size-3.5" />
+        )}
+      </Button>
     </div>
   );
 }

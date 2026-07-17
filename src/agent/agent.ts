@@ -128,7 +128,7 @@ type ProviderOptions = Record<string, Record<string, JSONValue>>;
  * Translate the app-level effort/thinking settings into each provider's own
  * knob (verified against the installed SDK option schemas):
  * - Anthropic: `effort` (low…max) + `thinking` adaptive/disabled
- * - OpenAI: `reasoningEffort` (minimal…xhigh)
+ * - OpenAI: `reasoningEffort` (minimal…max on GPT-5.6; older models cap at xhigh)
  * - Gemini: `thinkingConfig.thinkingLevel` (3.x) / `.thinkingBudget` (2.5)
  * - OpenRouter & custom endpoints: `reasoningEffort` → `reasoning_effort`
  */
@@ -153,7 +153,11 @@ export function buildProviderOptions(cfg: AgentModelConfig): ProviderOptions {
     case 'openai':
       return {
         openai: {
-          reasoningEffort: thinking ? (effort === 'max' ? 'xhigh' : effort) : 'minimal',
+          reasoningEffort: thinking
+            ? effort === 'max' && !cfg.modelId.startsWith('gpt-5.6')
+              ? 'xhigh'
+              : effort
+            : 'minimal',
         },
       };
     case 'codex':
@@ -164,7 +168,11 @@ export function buildProviderOptions(cfg: AgentModelConfig): ProviderOptions {
         openai: {
           store: false,
           include: ['reasoning.encrypted_content'],
-          reasoningEffort: thinking ? (effort === 'max' ? 'xhigh' : effort) : 'minimal',
+          reasoningEffort: thinking
+            ? effort === 'max' && !cfg.modelId.startsWith('gpt-5.6')
+              ? 'xhigh'
+              : effort
+            : 'minimal',
           reasoningSummary: 'auto',
         },
       };

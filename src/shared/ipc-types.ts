@@ -672,7 +672,7 @@ export type PlaybookMeta = {
 
 /** One entry of the template registry index, as shown in the gallery. The
  *  blueprint files (compose + toml) stay in main and never cross IPC — a
- *  deploy is a normal agent run seeded with the generated prompt. */
+ *  deploy runs the deterministic pipeline in main (template-deploy.ts). */
 export type TemplateMeta = {
   id: string;
   name: string;
@@ -682,6 +682,50 @@ export type TemplateMeta = {
   logoUrl?: string;
   links: { github?: string; website?: string; docs?: string };
   tags: string[];
+};
+
+/** Fixed pipeline stages of a deterministic template deploy, in order. */
+export type TemplateDeployStepId =
+  | 'connect'
+  | 'docker'
+  | 'files'
+  | 'start'
+  | 'verify'
+  | 'expose';
+
+export type TemplateDeployStepStatus = 'running' | 'done' | 'failed' | 'skipped';
+
+/** What the deploy produced — shown in the summary card and persisted. */
+export type TemplateDeploySummary = {
+  appName: string;
+  appDir: string;
+  /** Web endpoints made reachable via the compose override's published ports. */
+  urls: Array<{ serviceName: string; url: string; hostname?: string }>;
+  /** Transient completion data. History persists names only; values remain in
+   *  memory for the summary and in the protected remote .env file. */
+  credentials: Array<{ key: string; value: string }>;
+  services: Array<{ name: string; state: string; health?: string }>;
+};
+
+/** Progress stream of one deploy (main → renderer, keyed by deployId). */
+export type TemplateDeployEvent =
+  | {
+      deployId: string;
+      type: 'step';
+      step: TemplateDeployStepId;
+      status: TemplateDeployStepStatus;
+      detail?: string;
+    }
+  | { deployId: string; type: 'log'; text: string }
+  | { deployId: string; type: 'done'; summary: TemplateDeploySummary }
+  | { deployId: string; type: 'error'; error: string }
+  | { deployId: string; type: 'cancelled' };
+
+export type TemplateDeployRequest = {
+  /** Created by the renderer before invoking main so no early progress event is lost. */
+  deployId: string;
+  serverId: string;
+  templateId: string;
 };
 
 // ---------------------------------------------------------------------------
@@ -1144,6 +1188,8 @@ export const IPC = {
   playbooksList: 'playbooks:list',
   // app templates (invoke) — the Wizards tab's open-source app gallery
   templatesList: 'templates:list',
+  templatesDeploy: 'templates:deploy',
+  templatesDeployCancel: 'templates:deploy-cancel',
   // artifacts (invoke)
   artifactsScan: 'artifacts:scan',
   artifactsAction: 'artifacts:action',
@@ -1215,6 +1261,7 @@ export const IPC = {
   evtLogData: 'logs:data',
   evtLogExit: 'logs:exit',
   evtMonitorStats: 'monitor:stats',
+  evtTemplateDeploy: 'templates:deploy-event',
   evtAgentEvent: 'agent:event',
   evtGithubAuth: 'github:auth-event',
   evtGoogleDriveAuth: 'google-drive:auth-event',

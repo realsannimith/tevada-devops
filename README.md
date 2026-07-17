@@ -17,6 +17,56 @@ HTTPS site. Like Termius, if Termius did the work for you.
 
 </div>
 
+## 🧠 Built with Codex & GPT-5.6
+
+**Repo:** <https://github.com/realsannimith/tevada-devops>
+
+OpenAI's **GPT-5.6 (Sol)** is used twice over in this project: **Codex built the
+app**, and **GPT-5.6 is the recommended agent model** through ChatGPT sign-in or
+an OpenAI API key.
+
+### How Codex & GPT-5.6 built this project
+
+Tevada DevOps was developed AI-first, with **Codex running GPT-5.6-Sol** as the
+primary engineer throughout — planning features, writing the code, and iterating
+on review feedback across the whole codebase:
+
+- **Core systems** — the `ssh2` connection manager (multiplexed shells, exec
+  channels, SFTP), the streaming tool-loop agent, the command-safety blacklist,
+  and the IPC bridge between Electron's main process and the renderer.
+- **Product surfaces** — the chat agent UI with live command output, interactive
+  xterm terminals, live monitoring dashboards, the SFTP file browser, guided
+  wizards, and the Dokploy-format one-click app template deploys (deterministic
+  SSH pipeline: write compose files → `docker compose up` → verify → publish
+  ports).
+- **The hard parts** — Codex + GPT-5.6 debugged the messy platform issues along
+  the way: Electron frameless-window drag-region click handling, macOS packaging
+  (native module bundling, keychain-encrypted credential storage), and the
+  device-flow GitHub App integration.
+- **Quality gate** — the Vitest unit suites, typed IPC contracts, and the
+  multi-platform GitHub Actions release pipeline were built and kept green the
+  same way.
+
+### How GPT-5.6 runs inside the app
+
+The DevOps agent is a streaming **tool-calling loop** (`src/agent/agent.ts`):
+GPT-5.6 plans the work, then executes it over SSH with tools — run commands,
+read/write remote files via SFTP, read live stats — while every command, its
+output, and its exit code stream into the UI in real time.
+
+- **Sign in with ChatGPT (Codex)** — no API key needed. The app ports the
+  open-source `codex` CLI's OAuth/PKCE login (`src/main/codexAuthCore.ts`) so
+  you authenticate with your ChatGPT subscription, and the agent calls the Codex
+  backend Responses API (`chatgpt.com/backend-api/codex`). **GPT-5.6 Sol is the
+  default model**, with GPT-5.6 Terra and the rest of the GPT-5 family
+  selectable in the model picker.
+- **OpenAI API key** — bring your own key and pick **GPT-5.6 Sol / Terra /
+  Luna** from the model picker (`src/shared/providers.ts`).
+- **Wizards** — guided playbooks seed the GPT-5.6 agent with structured prompts
+  (host a website with nginx + TLS, set up databases, automated backups), so the
+  model does the DevOps work end to end. One-click app templates use a separate,
+  deterministic deployment pipeline with no model in the loop.
+
 ## Download
 
 Grab the latest release for your OS from the
@@ -55,8 +105,9 @@ Every release is built from source in public on GitHub Actions — check the
 - 🔐 **Your keys stay yours** — credentials are encrypted with your OS keychain
   and never leave the main process. Bring your own AI API key.
 
-Built with Electron + Vite + React + Tailwind + shadcn, the Vercel AI SDK, and
-Google Gemini.
+Built with Electron + Vite + React + Tailwind + shadcn and the Vercel AI SDK.
+**GPT-5.6 via Codex** is the recommended agent setup; Gemini, Claude, and other
+BYOK providers are supported too.
 
 ## Features
 
@@ -64,9 +115,11 @@ Google Gemini.
   connect/disconnect, live status indicators.
 - **Interactive terminals** — a real remote PTY per server (xterm.js), with
   scrollback preserved across tab switches. `htop`, `vim`, resize — all work.
-- **AI DevOps agent** — a Gemini tool-loop agent with tools to run commands, read/
-  write files (SFTP), and read stats over SSH. Runs **full-auto** by default; every
-  command it runs is shown live with its output and exit code.
+- **AI DevOps agent** — a streaming tool-loop agent, with **GPT-5.6** recommended
+  through Codex sign-in or an OpenAI API key. Gemini, Claude, and other BYOK
+  providers work too. It can run commands, read/write files (SFTP), and inspect
+  stats over SSH. Runs **full-auto** by default; every command, output, and exit
+  code is shown live.
 - **Monitoring dashboards** — per-server live CPU / memory / disk / network charts,
   uptime, load, and top processes, polled over SSH. Pauses when the tab is hidden.
 - **Wizards** — guided, AI-driven playbooks: *Host a website/app* (nginx + TLS +

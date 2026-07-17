@@ -122,16 +122,21 @@ export const PROVIDER_MODELS: Record<ProviderId, ModelOption[]> = {
     { id: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6' },
     { id: 'claude-haiku-4-5', label: 'Claude Haiku 4.5' },
   ],
+  // GPT-5.6 family shipped 2026-07-09: `gpt-5.6` is the API alias for the
+  // flagship gpt-5.6-sol; Terra and Luna are the cheaper/faster tiers.
   openai: [
+    { id: 'gpt-5.6', label: 'GPT-5.6 Sol' },
+    { id: 'gpt-5.6-terra', label: 'GPT-5.6 Terra' },
+    { id: 'gpt-5.6-luna', label: 'GPT-5.6 Luna' },
     { id: 'gpt-5.5', label: 'GPT-5.5' },
     { id: 'gpt-5.4', label: 'GPT-5.4' },
     { id: 'gpt-5.4-mini', label: 'GPT-5.4 Mini' },
-    { id: 'gpt-5.4-nano', label: 'GPT-5.4 Nano' },
   ],
   openrouter: [
     { id: 'anthropic/claude-sonnet-5', label: 'Claude Sonnet 5' },
     { id: 'anthropic/claude-opus-4.8', label: 'Claude Opus 4.8' },
     { id: 'anthropic/claude-haiku-4.5', label: 'Claude Haiku 4.5' },
+    { id: 'openai/gpt-5.6', label: 'GPT-5.6 Sol' },
     { id: 'openai/gpt-5.5', label: 'GPT-5.5' },
     { id: 'openai/gpt-5.4-mini', label: 'GPT-5.4 Mini' },
     { id: 'google/gemini-3.5-flash', label: 'Gemini 3.5 Flash' },
@@ -164,24 +169,24 @@ export const PROVIDER_MODELS: Record<ProviderId, ModelOption[]> = {
   // codex) with the subscription token, so these are the codex model slugs, not
   // the api.openai.com ones. Mirrors FCode's Codex model list.
   codex: [
+    { id: 'gpt-5.6', label: 'GPT-5.6 Sol' },
+    { id: 'gpt-5.6-terra', label: 'GPT-5.6 Terra' },
     { id: 'gpt-5.5', label: 'GPT-5.5' },
     { id: 'gpt-5.4', label: 'GPT-5.4' },
     { id: 'gpt-5.4-mini', label: 'GPT-5.4 Mini' },
     { id: 'gpt-5.3-codex', label: 'GPT-5.3 Codex' },
-    { id: 'gpt-5.2-codex', label: 'GPT-5.2 Codex' },
-    { id: 'gpt-5.2', label: 'GPT-5.2' },
   ],
 };
 
 export const DEFAULT_MODEL: Record<ProviderId, string> = {
   google: 'gemini-3.5-flash',
   anthropic: 'claude-sonnet-5',
-  openai: 'gpt-5.4',
+  openai: 'gpt-5.6',
   openrouter: 'anthropic/claude-sonnet-5',
   xai: 'grok-4.3',
   groq: 'openai/gpt-oss-120b',
   'openai-compatible': '',
-  codex: 'gpt-5.5',
+  codex: 'gpt-5.6',
 };
 
 /** Sentinel value for the "Custom…" item in the model select. */

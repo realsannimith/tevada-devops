@@ -17,10 +17,12 @@ import { FileEditorDialog, type EditorTarget } from '@/components/FileEditorDial
 import { useServers } from '@/hooks/useServers';
 import {
   ArrowUpIcon,
+  ChevronRightIcon,
   CloudDownloadIcon,
   CloudUploadIcon,
   FileTextIcon,
   FolderIcon,
+  FolderOpenIcon,
   FolderPlusIcon,
   HomeIcon,
   Loader2Icon,
@@ -310,8 +312,14 @@ export function FilesView({ serverId }: { serverId: string }) {
 
   if (!connected) {
     return (
-      <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
-        Connect this server to browse its files.
+      <div className="flex h-full flex-col items-center justify-center gap-2 p-6 text-center">
+        <span className="flex size-10 items-center justify-center rounded-xl bg-secondary text-muted-foreground">
+          <FolderOpenIcon className="size-5" />
+        </span>
+        <p className="text-sm font-medium text-ink">Not connected</p>
+        <p className="text-[11px] text-muted-foreground">
+          Connect this server to browse its files.
+        </p>
       </div>
     );
   }
@@ -343,16 +351,19 @@ export function FilesView({ serverId }: { serverId: string }) {
         >
           <ArrowUpIcon className="size-4" />
         </Button>
+        <div className="mx-1 h-4 w-px shrink-0 bg-border" aria-hidden />
         <div className="flex min-w-0 flex-1 items-center overflow-x-auto">
           <div className="flex items-center whitespace-nowrap font-mono text-[12px]">
             {crumbs.map((c, i) => (
               <span key={c.path} className="flex items-center">
-                {i > 0 && <span className="px-0.5 text-muted-foreground/40">/</span>}
+                {i > 0 && (
+                  <ChevronRightIcon className="size-3 shrink-0 text-muted-foreground/40" />
+                )}
                 <button
                   className={cn(
-                    'rounded px-1 py-0.5 hover:bg-secondary',
+                    'rounded-md px-1 py-0.5 transition-colors hover:bg-secondary hover:text-ink',
                     i === crumbs.length - 1
-                      ? 'text-ink'
+                      ? 'font-medium text-ink'
                       : 'text-muted-foreground',
                   )}
                   onClick={() => navigate(c.path)}
@@ -413,9 +424,18 @@ export function FilesView({ serverId }: { serverId: string }) {
             </Button>
           </div>
         ) : entries === null ? (
-          <div className="flex h-full items-center justify-center gap-2 text-sm text-muted-foreground">
-            <Loader2Icon className="size-4 animate-spin" />
-            Loading…
+          <div className="mx-auto max-w-3xl px-4 py-3">
+            <div className="surface-panel divide-y divide-border">
+              {Array.from({ length: 6 }, (_, i) => (
+                <div key={i} className="flex animate-pulse items-center gap-3 px-4 py-2.5">
+                  <span className="size-7 shrink-0 rounded-lg bg-secondary" />
+                  <span
+                    className="h-3 rounded bg-secondary"
+                    style={{ width: `${[42, 30, 55, 36, 48, 26][i]}%` }}
+                  />
+                </div>
+              ))}
+            </div>
           </div>
         ) : (
           <div className="mx-auto max-w-3xl px-4 py-3">
@@ -465,11 +485,25 @@ export function FilesView({ serverId }: { serverId: string }) {
             )}
 
             {entries.length === 0 && !creatingFolder ? (
-              <div className="flex h-40 items-center justify-center text-[13px] text-muted-foreground">
-                This folder is empty.
+              <div className="flex h-48 flex-col items-center justify-center gap-2 text-center">
+                <span className="flex size-10 items-center justify-center rounded-xl bg-secondary text-muted-foreground">
+                  <FolderOpenIcon className="size-5" />
+                </span>
+                <p className="text-[13px] font-medium text-ink">This folder is empty</p>
+                <p className="text-[11px] text-muted-foreground">
+                  Upload files or create a folder to get started.
+                </p>
               </div>
             ) : (
-              <div className="surface-panel divide-y divide-border">
+              <div className="surface-panel overflow-hidden">
+                <div className="flex items-center gap-3 border-b border-border bg-secondary/40 px-4 py-1.5 text-[10px] font-medium tracking-wide text-muted-foreground uppercase">
+                  <span className="w-7 shrink-0" aria-hidden />
+                  <span className="min-w-0 flex-1">Name</span>
+                  <span className="hidden w-[4.5rem] shrink-0 sm:inline">Mode</span>
+                  <span className="hidden w-16 shrink-0 text-right sm:inline">Size</span>
+                  <span className="hidden w-16 shrink-0 text-right md:inline">Modified</span>
+                </div>
+                <div className="divide-y divide-border">
                 {entries.map((e) => (
                   <FileRow
                     key={e.path}
@@ -491,6 +525,7 @@ export function FilesView({ serverId }: { serverId: string }) {
                     busy={busy}
                   />
                 ))}
+                </div>
               </div>
             )}
           </div>
@@ -539,7 +574,7 @@ function FileRow({
   const editable = entry.type === 'file' && isTextFile(entry.name);
 
   return (
-    <div className="group flex items-center gap-3 px-4 py-2">
+    <div className="group relative flex items-center gap-3 px-4 py-2 transition-colors hover:bg-secondary/50">
       <span className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-secondary">
         <Icon
           aria-hidden
@@ -586,18 +621,19 @@ function FileRow({
 
       {!renaming && (
         <>
-          <span className="hidden shrink-0 font-mono text-[10px] text-muted-foreground/50 sm:inline">
+          <span className="hidden w-[4.5rem] shrink-0 font-mono text-[10px] text-muted-foreground/50 transition-opacity group-focus-within:opacity-0 group-hover:opacity-0 sm:inline">
             {modeString(entry.mode)}
           </span>
-          <span className="hidden w-16 shrink-0 text-right font-mono text-[11px] text-muted-foreground/70 sm:inline">
+          <span className="hidden w-16 shrink-0 text-right font-mono text-[11px] text-muted-foreground/70 transition-opacity group-focus-within:opacity-0 group-hover:opacity-0 sm:inline">
             {entry.type === 'file' ? formatSize(entry.size) : ''}
           </span>
-          <span className="hidden w-16 shrink-0 text-right text-[11px] text-muted-foreground/70 md:inline">
+          <span className="hidden w-16 shrink-0 text-right text-[11px] text-muted-foreground/70 transition-opacity group-focus-within:opacity-0 group-hover:opacity-0 md:inline">
             {formatMtime(entry.mtime)}
           </span>
 
-          {/* Row actions — appear on hover, mirroring the Artifacts tab. */}
-          <div className="flex shrink-0 items-center opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
+          {/* Row actions — overlay the meta columns on hover so the size/date
+              columns stay aligned no matter how many buttons a row has. */}
+          <div className="absolute inset-y-0 right-2.5 flex items-center opacity-0 transition-opacity group-focus-within:opacity-100 group-hover:opacity-100">
             {editable && (
               <Button
                 variant="ghost"

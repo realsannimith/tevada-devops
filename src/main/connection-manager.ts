@@ -722,11 +722,12 @@ export class ConnectionManager {
     serverId: string,
     remotePath: string,
     content: string,
+    options: { mode?: number } = {},
   ): Promise<void> {
     const m = this.requireConnected(serverId);
     const sftp = await this.getSftp(m);
     return new Promise((resolve, reject) => {
-      const stream = sftp.createWriteStream(remotePath);
+      const stream = sftp.createWriteStream(remotePath, options);
       stream.on('error', reject);
       stream.on('close', () => resolve());
       stream.end(content);

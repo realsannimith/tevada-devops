@@ -33,10 +33,13 @@ export function ProjectFormDialog({
   open,
   onOpenChange,
   project,
+  onAddServer,
 }: {
   open: boolean;
   onOpenChange: (v: boolean) => void;
   project?: Project | null;
+  /** Lets the empty "no servers" state jump straight into the Add server flow. */
+  onAddServer?: () => void;
 }) {
   const { add, update } = useProjects();
   const { servers, refresh: refreshServers } = useServers();
@@ -166,10 +169,30 @@ export function ProjectFormDialog({
 
           <div className="grid gap-2">
             <Label>Servers</Label>
+            <p className="-mt-1 text-xs text-muted-foreground">
+              Tick the servers this project&apos;s chats are allowed to use. You
+              can change this any time.
+            </p>
             {servers.length === 0 ? (
-              <p className="text-xs text-muted-foreground">
-                No servers yet — add servers first, then assign them here.
-              </p>
+              <div className="surface-panel grid justify-items-start gap-2 rounded-md p-3">
+                <p className="text-xs text-muted-foreground">
+                  You haven&apos;t added any servers yet. A project without
+                  servers still works — it just groups chats.
+                </p>
+                {onAddServer && (
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="secondary"
+                    onClick={() => {
+                      onOpenChange(false);
+                      onAddServer();
+                    }}
+                  >
+                    <ServerIcon className="size-3.5" /> Add a server
+                  </Button>
+                )}
+              </div>
             ) : (
               <div className="surface-panel grid gap-1 rounded-md p-1">
                 {servers.map((s) => {
