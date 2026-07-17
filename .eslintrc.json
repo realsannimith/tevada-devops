@@ -36,6 +36,8 @@
   },
   "ignorePatterns": [
     "node_modules",
+    ".electron-runtime",
+    ".easyhost",
     ".vite",
     "out",
     "dist",
