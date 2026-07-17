@@ -17,10 +17,37 @@ vi.mock('electron', () => ({
 import {
   AppUpdater,
   buildMacSwapScript,
+  conventionalAssetName,
   isVersionNewer,
+  parseLatestTagFromUrl,
   pickUpdateAsset,
   type ReleaseAsset,
 } from './updater';
+
+describe('parseLatestTagFromUrl', () => {
+  it('reads the tag from a followed releases/latest redirect', () => {
+    expect(
+      parseLatestTagFromUrl('https://github.com/o/r/releases/tag/v1.2.0'),
+    ).toBe('v1.2.0');
+    expect(
+      parseLatestTagFromUrl('https://github.com/o/r/releases/tag/v1.2.0?foo=1'),
+    ).toBe('v1.2.0');
+    // No releases yet → GitHub serves /releases without a tag segment.
+    expect(parseLatestTagFromUrl('https://github.com/o/r/releases')).toBeNull();
+  });
+});
+
+describe('conventionalAssetName', () => {
+  it('matches what the release workflow publishes', () => {
+    expect(conventionalAssetName('1.2.0', 'darwin', 'arm64')).toBe(
+      'Tevada.DevOps-darwin-arm64-1.2.0.zip',
+    );
+    expect(conventionalAssetName('1.2.0', 'win32', 'x64')).toBe(
+      'Tevada.DevOps-1.2.0.Setup.exe',
+    );
+    expect(conventionalAssetName('1.2.0', 'linux', 'x64')).toBeNull();
+  });
+});
 
 describe('isVersionNewer', () => {
   it('compares semver fields in order', () => {
@@ -101,22 +128,14 @@ describe('AppUpdater auto-download', () => {
     const zipBytes = new Uint8Array([0x50, 0x4b, 0x03, 0x04]);
     const fetchMock = vi
       .fn()
-      // 1st call: the GitHub "latest release" check.
+      // 1st call: the releases/latest redirect reveals the new tag.
       .mockResolvedValueOnce({
         ok: true,
-        json: async () => ({
-          tag_name: 'v1.0.2',
-          html_url: 'https://github.com/example/releases/tag/v1.0.2',
-          assets: [
-            {
-              name: `Tevada.DevOps-darwin-${process.arch}-1.0.2.zip`,
-              browser_download_url: 'https://example.test/update.zip',
-              size: zipBytes.byteLength,
-            },
-          ],
-        }),
+        url: 'https://github.com/example/repo/releases/tag/v1.0.2',
       })
-      // 2nd call: the asset download, started automatically by check().
+      // 2nd call: HEAD probe confirming the conventional asset exists.
+      .mockResolvedValueOnce({ ok: true })
+      // 3rd call: the asset download, started automatically by check().
       .mockResolvedValueOnce({
         ok: true,
         headers: { get: () => String(zipBytes.byteLength) },
@@ -140,13 +159,35 @@ describe('AppUpdater auto-download', () => {
 
     // check() kicks the download off without awaiting it.
     await vi.waitFor(() => expect(updater.getState().status).toBe('downloaded'));
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    // The whole flow must stay off the rate-limited REST API.
+    for (const call of fetchMock.mock.calls) {
+      expect(String(call[0])).not.toContain('api.github.com');
+    }
     // Collapse repeated statuses (progress events re-emit 'downloading').
     const sequence = states
       .map((s) => s.status)
       .filter((status, i, all) => i === 0 || status !== all[i - 1]);
     expect(sequence).toEqual(['checking', 'available', 'downloading', 'downloaded']);
     expect(updater.getState().availableVersion).toBe('1.0.2');
+  });
+
+  it('reports an API rate limit clearly when the redirect path also fails', async () => {
+    Object.defineProperty(process, 'platform', { value: 'darwin' });
+    electronApp.isPackaged = true;
+
+    const fetchMock = vi
+      .fn()
+      // Redirect path unreachable → falls back to the REST API…
+      .mockRejectedValueOnce(new Error('network down'))
+      // …which is rate-limited.
+      .mockResolvedValueOnce({ ok: false, status: 403 });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const updater = new AppUpdater(() => {}, 'example/repo');
+    const state = await updater.check();
+    expect(state.status).toBe('error');
+    expect(state.error).toContain('rate limit');
   });
 
   it('does not re-check once an update is staged', async () => {

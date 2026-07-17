@@ -2,8 +2,11 @@
  * In-app updates — same design as FCode's desktop updater, adapted to this
  * app's electron-forge + GitHub Releases pipeline:
  *
- *  - Detect: poll the GitHub "latest release" API (on startup, every 4 h, and
- *    on demand) and compare tags semver-style against the running version.
+ *  - Detect: poll GitHub's releases/latest redirect (on startup, every 4 h,
+ *    and on demand) and compare tags semver-style against the running
+ *    version. The redirect (and asset downloads) carry no unauthenticated
+ *    rate limit; the REST API — which does, 60 req/h per IP — is only a
+ *    fallback.
  *  - Download: starts automatically in the background as soon as an update is
  *    detected (FCode's prepare-in-background step), streaming the platform's
  *    installer asset to a temp dir with progress events pushed to the
@@ -66,6 +69,30 @@ export function isVersionNewer(currentVersion: string, candidateVersion: string)
   if (candidate.patch !== current.patch) return candidate.patch > current.patch;
   // Stable beats the same version's prerelease; never reinstall the same stable.
   return current.prerelease !== null && candidate.prerelease === null;
+}
+
+// --- release lookup helpers -------------------------------------------------------
+
+/** Extract the tag from a followed releases/latest redirect, e.g.
+ *  https://github.com/o/r/releases/tag/v1.2.0 → "v1.2.0". */
+export function parseLatestTagFromUrl(finalUrl: string): string | null {
+  const m = finalUrl.match(/\/releases\/tag\/([^/?#]+)/);
+  return m ? decodeURIComponent(m[1]) : null;
+}
+
+/**
+ * The asset name our release workflow produces for this platform/arch (the
+ * forge makers turn productName "Tevada DevOps" into "Tevada.DevOps"). Used to
+ * build a direct download URL without the REST API — see check() for why.
+ */
+export function conventionalAssetName(
+  version: string,
+  platform: NodeJS.Platform,
+  arch: string,
+): string | null {
+  if (platform === 'darwin') return `Tevada.DevOps-darwin-${arch}-${version}.zip`;
+  if (platform === 'win32') return `Tevada.DevOps-${version}.Setup.exe`;
+  return null;
 }
 
 // --- release asset selection ----------------------------------------------------
@@ -246,37 +273,21 @@ export class AppUpdater {
     this.busy = true;
     this.setState({ status: 'checking', error: undefined });
     try {
-      const res = await fetch(
-        `https://api.github.com/repos/${this.repo}/releases/latest`,
-        {
-          headers: {
-            Accept: 'application/vnd.github+json',
-            'User-Agent': 'tevada-devops-updater',
-          },
-          signal: AbortSignal.timeout(CHECK_TIMEOUT_MS),
-        },
-      );
-      if (!res.ok) throw new Error(`GitHub returned HTTP ${res.status}.`);
-      const release = (await res.json()) as {
-        tag_name?: string;
-        html_url?: string;
-        assets?: ReleaseAsset[];
-      };
-      const tag = release.tag_name ?? '';
-      const candidate = tag.replace(/^v/, '');
+      const latest = await this.fetchLatestRelease();
+      const candidate = latest.tag.replace(/^v/, '');
       const checkedAt = new Date().toISOString();
       if (!candidate || !isVersionNewer(this.state.currentVersion, candidate)) {
         this.setState({ status: 'up-to-date', checkedAt, availableVersion: undefined });
         return this.state;
       }
-      const asset = pickUpdateAsset(release.assets ?? [], process.platform, process.arch);
-      this.assetUrl = asset?.browser_download_url ?? null;
+      const asset = await this.resolveAsset(latest, candidate);
+      this.assetUrl = asset?.url ?? null;
       this.assetName = asset?.name ?? null;
       this.setState({
         status: 'available',
         checkedAt,
         availableVersion: candidate,
-        releaseUrl: release.html_url,
+        releaseUrl: latest.releaseUrl,
         canInstallInApp: this.assetUrl !== null,
       });
     } catch (err) {
@@ -294,6 +305,90 @@ export class AppUpdater {
       void this.download();
     }
     return this.state;
+  }
+
+  /**
+   * Latest release lookup. Primary: follow the plain releases/latest redirect
+   * on github.com — unlike the REST API it has no unauthenticated rate limit
+   * (the API's 60 req/h per IP is what produced "GitHub returned HTTP 403"
+   * failures). The API is kept only as a fallback, with rate-limit responses
+   * mapped to a message that says what actually happened.
+   */
+  private async fetchLatestRelease(): Promise<{
+    tag: string;
+    releaseUrl: string;
+    apiAssets: ReleaseAsset[] | null;
+  }> {
+    try {
+      const res = await fetch(`https://github.com/${this.repo}/releases/latest`, {
+        headers: { 'User-Agent': 'tevada-devops-updater', Accept: 'text/html' },
+        redirect: 'follow',
+        signal: AbortSignal.timeout(CHECK_TIMEOUT_MS),
+      });
+      if (!res.ok) throw new Error(`GitHub returned HTTP ${res.status}.`);
+      const tag = parseLatestTagFromUrl(res.url);
+      if (!tag) throw new Error('Could not read the latest release tag from GitHub.');
+      return { tag, releaseUrl: res.url, apiAssets: null };
+    } catch {
+      const res = await fetch(`https://api.github.com/repos/${this.repo}/releases/latest`, {
+        headers: {
+          Accept: 'application/vnd.github+json',
+          'User-Agent': 'tevada-devops-updater',
+        },
+        signal: AbortSignal.timeout(CHECK_TIMEOUT_MS),
+      });
+      if (!res.ok) {
+        throw new Error(
+          res.status === 403 || res.status === 429
+            ? 'GitHub rate limit reached — the next automatic check will retry.'
+            : `GitHub returned HTTP ${res.status}.`,
+        );
+      }
+      const release = (await res.json()) as {
+        tag_name?: string;
+        html_url?: string;
+        assets?: ReleaseAsset[];
+      };
+      if (!release.tag_name) throw new Error('GitHub release response had no tag.');
+      return {
+        tag: release.tag_name,
+        releaseUrl:
+          release.html_url ??
+          `https://github.com/${this.repo}/releases/tag/${release.tag_name}`,
+        apiAssets: release.assets ?? [],
+      };
+    }
+  }
+
+  /**
+   * Find this platform's installer for the release. With API metadata, pick
+   * from the real asset list; on the redirect path, build the conventional
+   * asset URL and confirm it exists with a HEAD request (release downloads are
+   * not rate-limited either). A convention change therefore degrades to the
+   * releases-page fallback instead of a broken download.
+   */
+  private async resolveAsset(
+    latest: { tag: string; apiAssets: ReleaseAsset[] | null },
+    version: string,
+  ): Promise<{ url: string; name: string } | null> {
+    if (latest.apiAssets) {
+      const asset = pickUpdateAsset(latest.apiAssets, process.platform, process.arch);
+      return asset ? { url: asset.browser_download_url, name: asset.name } : null;
+    }
+    const name = conventionalAssetName(version, process.platform, process.arch);
+    if (!name) return null;
+    const url = `https://github.com/${this.repo}/releases/download/${encodeURIComponent(latest.tag)}/${encodeURIComponent(name)}`;
+    try {
+      const res = await fetch(url, {
+        method: 'HEAD',
+        headers: { 'User-Agent': 'tevada-devops-updater' },
+        redirect: 'follow',
+        signal: AbortSignal.timeout(CHECK_TIMEOUT_MS),
+      });
+      return res.ok ? { url, name } : null;
+    } catch {
+      return null;
+    }
   }
 
   /** Stream the platform asset to a temp file with progress. Runs
