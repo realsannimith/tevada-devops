@@ -12,6 +12,7 @@ import {
   CheckIcon,
   ClockIcon,
   CpuIcon,
+  DatabaseIcon,
   Loader2Icon,
   MemoryIcon,
   ServerIcon,
@@ -60,6 +61,18 @@ function memPctOf(s: ServerStats): number {
   return s.mem.totalBytes ? (s.mem.usedBytes / s.mem.totalBytes) * 100 : 0;
 }
 
+/** Aggregate disk usage across a server's real volumes (the probe's df already
+ *  excludes tmpfs/devtmpfs/overlay, so summing doesn't count pseudo-fs). */
+function diskTotals(s: ServerStats): { usedBytes: number; totalBytes: number } {
+  return s.disks.reduce(
+    (acc, d) => ({
+      usedBytes: acc.usedBytes + d.usedBytes,
+      totalBytes: acc.totalBytes + d.totalBytes,
+    }),
+    { usedBytes: 0, totalBytes: 0 },
+  );
+}
+
 const STATUS_META: Record<
   ConnStatus,
   { label: string; cls: string; dot: string }
@@ -103,6 +116,16 @@ export function DashboardView({
   const avgMem = live.length
     ? live.reduce((sum, s) => sum + memPctOf(s), 0) / live.length
     : null;
+  const fleetDisk = useMemo(() => {
+    const t = live.reduce(
+      (acc, s) => {
+        const d = diskTotals(s);
+        return { usedBytes: acc.usedBytes + d.usedBytes, totalBytes: acc.totalBytes + d.totalBytes };
+      },
+      { usedBytes: 0, totalBytes: 0 },
+    );
+    return t.totalBytes > 0 ? t : null;
+  }, [live]);
 
   return (
     <div className="h-full overflow-y-auto p-6">
@@ -116,7 +139,7 @@ export function DashboardView({
       </div>
 
       {/* Fleet roll-up */}
-      <div className="mb-5 grid grid-cols-2 gap-4 lg:grid-cols-4">
+      <div className="mb-5 grid grid-cols-2 gap-4 md:grid-cols-3 lg:grid-cols-5">
         <SummaryCard
           icon={<SidebarGlyph icon={ServerIcon} variant="leading" />}
           label="Servers"
@@ -140,6 +163,20 @@ export function DashboardView({
           label="Avg Memory"
           value={avgMem === null ? '—' : `${avgMem.toFixed(0)}%`}
           sub={live.length ? `across ${live.length} live` : 'no live data'}
+        />
+        <SummaryCard
+          icon={<SidebarGlyph icon={DatabaseIcon} variant="leading" />}
+          label="Storage"
+          value={
+            fleetDisk === null
+              ? '—'
+              : `${((fleetDisk.usedBytes / fleetDisk.totalBytes) * 100).toFixed(0)}%`
+          }
+          sub={
+            fleetDisk === null
+              ? 'no live data'
+              : `${fmtBytes(fleetDisk.usedBytes)} of ${fmtBytes(fleetDisk.totalBytes)} used`
+          }
         />
       </div>
 
@@ -186,6 +223,11 @@ function ServerDashboardCard({
 }) {
   const connected = status === 'connected';
   const { latest } = useMonitorStats(server.id, connected);
+  const disk = useMemo(() => {
+    if (!latest) return null;
+    const t = diskTotals(latest);
+    return t.totalBytes > 0 ? t : null;
+  }, [latest]);
 
   // Keep the fleet roll-up in sync with this card's most recent sample.
   useEffect(() => {
@@ -281,6 +323,31 @@ function ServerDashboardCard({
               value={`${latest.topProcesses.length}`}
             />
           </div>
+          {/* Storage — aggregate used/total across the server's real volumes,
+              with a usage bar (same data the Monitoring tab breaks down
+              per-mount). */}
+          {disk && (
+            <div className="mt-3 text-[11px]">
+              <div className="flex items-center justify-between text-muted-foreground">
+                <span className="flex items-center gap-1.5">
+                  <DatabaseIcon aria-hidden className="size-3.5" />
+                  Storage
+                  {latest.disks.length > 1 && ` · ${latest.disks.length} volumes`}
+                </span>
+                <span className="tabular-nums">
+                  {fmtBytes(disk.usedBytes)} / {fmtBytes(disk.totalBytes)}
+                </span>
+              </div>
+              <div className="mt-1 h-1.5 rounded-full bg-secondary">
+                <div
+                  className="h-1.5 rounded-full bg-primary"
+                  style={{
+                    width: `${Math.min(100, (disk.usedBytes / disk.totalBytes) * 100)}%`,
+                  }}
+                />
+              </div>
+            </div>
+          )}
           {/* Machine spec — the static hardware facts, so the user can see what
               they're connected to (e.g. "2 vCPUs, Intel x86_64" / total RAM). */}
           {latest.host && (
@@ -291,6 +358,13 @@ function ServerDashboardCard({
                 label="Memory"
                 value={`${fmtRam(latest.mem.totalBytes)} RAM`}
               />
+              {disk && (
+                <SpecRow
+                  icon={DatabaseIcon}
+                  label="Storage"
+                  value={`${fmtBytes(disk.totalBytes)} disk`}
+                />
+              )}
             </div>
           )}
           </>

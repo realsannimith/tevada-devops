@@ -15,6 +15,7 @@ import {
   IconServer,
   IconCopy,
   IconCpu,
+  IconDatabase,
   IconDeviceLaptop,
   IconDeviceSdCard,
   IconDots,
@@ -99,6 +100,7 @@ export const ClockIcon = centralIconWrapper("clock");
 export const ComposerSendArrowIcon = centralIconWrapper("arrow-up");
 export const CopyIcon = adaptIcon(IconCopy);
 export const CpuIcon = adaptIcon(IconCpu);
+export const DatabaseIcon = adaptIcon(IconDatabase);
 export const DeviceLaptopIcon = adaptIcon(IconDeviceLaptop);
 export const EllipsisIcon = adaptIcon(IconDots);
 export const ExternalLinkIcon = adaptIcon(IconExternalLink);
