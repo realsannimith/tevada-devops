@@ -63,7 +63,9 @@ export function DatabaseCredentialDialog({
 }: {
   target: CredentialDialogTarget | null;
   onOpenChange: (open: boolean) => void;
-  onSaved: () => void;
+  /** Receives the freshly-saved credential so callers can act on it (e.g. open
+   *  the database editor right after the user fills the form). */
+  onSaved: (meta?: DatabaseCredentialMeta) => void;
   onDeleted: (id: string) => void;
 }) {
   return (
@@ -80,8 +82,8 @@ export function DatabaseCredentialDialog({
         ) : target?.mode === 'add' ? (
           <AddCredential
             target={target}
-            onSaved={() => {
-              onSaved();
+            onSaved={(meta) => {
+              onSaved(meta);
               onOpenChange(false);
             }}
           />
@@ -268,7 +270,7 @@ function AddCredential({
     port: number;
     containerName?: string;
   };
-  onSaved: () => void;
+  onSaved: (meta: DatabaseCredentialMeta) => void;
 }) {
   const isRedis = target.engine === 'redis';
   const [host, setHost] = useState(target.host);
@@ -322,7 +324,7 @@ function AddCredential({
     setSaving(true);
     setError(null);
     try {
-      await window.easyhost.credentials.save({
+      const saved = await window.easyhost.credentials.save({
         serverId: target.serverId,
         engine: target.engine,
         host: host.trim(),
@@ -331,7 +333,7 @@ function AddCredential({
         username: isRedis ? undefined : username.trim() || undefined,
         password,
       });
-      onSaved();
+      onSaved(saved);
     } catch {
       setError('Failed to save credentials.');
     } finally {

@@ -57,7 +57,7 @@ import type {
   ChatTodoHistoryItem,
   TurnDispatchMode,
 } from '@/shared/ipc-types';
-import { ATTACHMENT_LIMITS } from '@/shared/ipc-types';
+import { ATTACHMENT_LIMITS, LOCAL_SERVER_ID } from '@/shared/ipc-types';
 import {
   ClockIcon,
   ComposerSendArrowIcon,
@@ -89,6 +89,14 @@ export function ChatPanel() {
   const [historyReady, setHistoryReady] = useState(false);
   // Files/images staged in the composer, sent with the next message.
   const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
+  // Whether Settings offers "This Mac" as a target (agentLocalEnabled).
+  const [localTargetEnabled, setLocalTargetEnabled] = useState(false);
+  useEffect(() => {
+    void window.easyhost.settings
+      .get()
+      .then((s) => setLocalTargetEnabled(!!s.agentLocalEnabled))
+      .catch(() => {});
+  }, []);
   // Messages the user queued while a run was in flight — auto-sent, in order,
   // once the run finishes (FCode's queued-turn model).
   const [queuedTurns, setQueuedTurns] = useState<QueuedTurn[]>([]);
@@ -556,7 +564,19 @@ export function ChatPanel() {
             already locked to its project's servers, so it has no picker — it
             runs against all of them. */}
         {project === NO_PROJECT && (
-          <Select value={target} onValueChange={setTarget}>
+          <Select
+            value={target}
+            onValueChange={setTarget}
+            // The "This Mac" entry follows a Settings toggle — re-check it
+            // whenever the picker opens so a change applies without a reload.
+            onOpenChange={(open) => {
+              if (open) {
+                void window.easyhost.settings
+                  .get()
+                  .then((s) => setLocalTargetEnabled(!!s.agentLocalEnabled));
+              }
+            }}
+          >
             <SelectTrigger
               size="sm"
               className={COMPOSER_FOOTER_PICKER_TRIGGER_CLASS_NAME}
@@ -570,6 +590,9 @@ export function ChatPanel() {
             </SelectTrigger>
             <SelectContent side="top">
               <SelectItem value={ALL}>All servers</SelectItem>
+              {(localTargetEnabled || target === LOCAL_SERVER_ID) && (
+                <SelectItem value={LOCAL_SERVER_ID}>This Mac</SelectItem>
+              )}
               {servers.map((s) => (
                 <SelectItem key={s.id} value={s.id}>
                   {s.name}

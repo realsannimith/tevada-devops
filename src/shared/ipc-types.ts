@@ -89,6 +89,12 @@ export type AppSettings = {
   aiEffort: EffortLevel;
   /** Extended thinking / reasoning on or off (where the provider supports it). */
   aiThinking: boolean;
+  /** Agent task planning (the updateTodos checklist). Off = the tool and its
+   *  prompt/reminder text are removed entirely, saving tokens on every turn. */
+  aiPlanning: boolean;
+  /** Offer "This Mac" as an agent target: tools run locally on the user's own
+   *  machine (child_process + fs) instead of over SSH. Off by default. */
+  agentLocalEnabled: boolean;
   /** Auto-start the local MCP server on launch so external agents can connect. */
   mcpEnabled: boolean;
   /** Localhost port the MCP server listens on. */
@@ -97,6 +103,10 @@ export type AppSettings = {
    *  run_command / run_script / write_file / setup_deploy_notifications. */
   mcpReadOnly: boolean;
 };
+
+/** Synthetic server id for the "This Mac" local agent target. Never collides
+ *  with stored profiles (their ids are UUIDs). */
+export const LOCAL_SERVER_ID = 'local-mac';
 
 export const DEFAULT_SETTINGS: AppSettings = {
   approvalMode: false, // full-auto (YOLO) by default, per product decision
@@ -108,6 +118,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
   aiBaseUrl: '',
   aiEffort: 'medium',
   aiThinking: true,
+  aiPlanning: true,
+  agentLocalEnabled: false,
   mcpEnabled: false,
   mcpPort: 7423,
   mcpReadOnly: false,
@@ -327,6 +339,93 @@ export type ContainerCredentialGuess = {
   username?: string;
   database?: string;
 };
+
+// ---------------------------------------------------------------------------
+// Database editor (the lightweight in-app DB IDE) — see main/db-query.ts and
+// components/DatabaseEditorView.tsx. Every operation runs the database's own
+// CLI (psql / mysql) over the managed SSH connection and parses stdout; the
+// renderer only ever sees the normalized shapes below. Supported engines:
+// postgresql, mysql, mariadb.
+// ---------------------------------------------------------------------------
+
+/** Identifies which database to open — derived straight from a database
+ *  artifact, no saved credential required. The backend authenticates using the
+ *  already-connected server (Docker local socket, native peer/auth_socket, or a
+ *  saved credential when one exists). */
+export type DbEditorTarget = {
+  serverId: string;
+  /** 'postgresql' | 'mysql' | 'mariadb'. */
+  engine: string;
+  /** Internal host (normally 127.0.0.1) — only used for a native TCP fallback. */
+  host: string;
+  port: number;
+  /** Database/schema name if known; otherwise the backend picks a sensible default. */
+  database?: string;
+  /** Docker container name when the artifact is a known container. */
+  containerName?: string;
+};
+
+/** A single table or view discovered by introspection. */
+export type DbTable = {
+  schema: string;
+  name: string;
+  type: 'table' | 'view';
+};
+
+/** One column of a table's structure. */
+export type DbColumn = {
+  name: string;
+  type: string;
+  nullable: boolean;
+  /** Raw default expression, or null when there is none. */
+  default: string | null;
+  pk: boolean;
+};
+
+/** A normalized result set. `error` is set (and rows empty) when the CLI
+ *  reported a SQL/connection error instead of a result. `null` cells are true
+ *  SQL NULLs, distinct from empty strings. */
+export type DbQueryResult = {
+  columns: string[];
+  rows: (string | null)[][];
+  rowCount: number;
+  truncated: boolean;
+  error?: string;
+};
+
+export type DbTablesResult =
+  | { ok: true; engine: string; defaultSchema: string; tables: DbTable[] }
+  | { ok: false; error: string };
+
+export type DbColumnsResult =
+  | { ok: true; columns: DbColumn[] }
+  | { ok: false; error: string };
+
+export type DbSelectResult =
+  | { ok: true; result: DbQueryResult; totalRows: number | null; limit: number; offset: number }
+  | { ok: false; error: string };
+
+export type DbRunResult =
+  | { ok: true; result: DbQueryResult; elapsedMs: number }
+  | { ok: false; error: string };
+
+// Schema graph (ERD) — powers the Diagram tab.
+export type DbErdColumn = { name: string; type: string; pk: boolean; fk: boolean };
+export type DbErdTable = { name: string; columns: DbErdColumn[] };
+export type DbErdRelation = {
+  fromTable: string;
+  fromColumn: string;
+  toTable: string;
+  toColumn: string;
+  /** one-to-one when the FK column is itself unique/PK, else one-to-many. */
+  kind: 'one-to-one' | 'one-to-many';
+};
+export type DbGraphResult =
+  | { ok: true; tables: DbErdTable[]; relations: DbErdRelation[] }
+  | { ok: false; error: string };
+
+// Inline cell editing (the Data grid). `null` is a true SQL NULL.
+export type DbUpdateResult = { ok: true } | { ok: false; error: string };
 
 // ---------------------------------------------------------------------------
 // Command execution result
@@ -681,6 +780,27 @@ export type TemplateMeta = {
   /** Absolute URL of the logo in the registry (undefined if none). */
   logoUrl?: string;
   links: { github?: string; website?: string; docs?: string };
+  tags: string[];
+};
+
+/** A bounded catalog request. Pages are 1-based at the renderer boundary. */
+export type TemplateListRequest = {
+  page?: number;
+  pageSize?: number;
+  query?: string;
+  tag?: string;
+  /** Used when reopening a saved template deploy that is not on the current page. */
+  templateId?: string;
+};
+
+/** Only one page of template metadata crosses IPC, keeping the renderer light. */
+export type TemplateListResult = {
+  items: TemplateMeta[];
+  page: number;
+  pageSize: number;
+  total: number;
+  totalPages: number;
+  /** Most common catalog tags, calculated from the complete index in main. */
   tags: string[];
 };
 
@@ -1207,6 +1327,14 @@ export const IPC = {
   credentialsReveal: 'credentials:reveal',
   credentialsDelete: 'credentials:delete',
   credentialsRecoverFromContainer: 'credentials:recover-from-container',
+  // database editor (invoke) — the lightweight in-app DB IDE; runs psql/mysql
+  // over SSH against a saved credential (see main/db-query.ts)
+  dbTables: 'db:tables',
+  dbColumns: 'db:columns',
+  dbSelect: 'db:select',
+  dbQuery: 'db:query',
+  dbGraph: 'db:graph',
+  dbUpdateCell: 'db:update-cell',
   // github (invoke)
   githubStatus: 'github:status',
   githubDeviceStart: 'github:device-start',

@@ -12,6 +12,7 @@ import {
   DatabaseCredentialDialog,
   type CredentialDialogTarget,
 } from '@/components/DatabaseCredentialDialog';
+import { DatabaseEditorView } from '@/components/DatabaseEditorView';
 import { EnvFileDialog, type EnvTarget } from '@/components/EnvFileDialog';
 import { LogStreamPanel } from '@/components/LogStreamPanel';
 import { useServers } from '@/hooks/useServers';
@@ -44,6 +45,7 @@ import {
   RefreshIcon,
   SettingsIcon,
   StopIcon,
+  TableIcon,
   TerminalIcon,
   WifiIcon,
   type AppIcon,
@@ -55,6 +57,7 @@ import type {
   ArtifactRuntime,
   ArtifactStatus,
   DatabaseCredentialMeta,
+  DbEditorTarget,
   DeploymentInfo,
   LogStreamSource,
   ServerArtifact,
@@ -69,6 +72,9 @@ const ENGINE_LABELS: Record<string, string> = {
   redis: 'Redis',
   mongodb: 'MongoDB',
 };
+
+/** Engines the in-app Database Editor can browse (see main/db-query.ts). */
+const SQL_EDITOR_ENGINES = new Set(['postgresql', 'mysql', 'mariadb']);
 
 const ENGINE_GLYPHS: Record<string, { icon: AppIcon; color?: string }> = {
   postgresql: { icon: PostgresqlIcon, color: '#4169E1' },
@@ -168,6 +174,8 @@ export function ArtifactsView({
   // something saved.
   const [credentials, setCredentials] = useState<DatabaseCredentialMeta[]>([]);
   const [dialogTarget, setDialogTarget] = useState<CredentialDialogTarget | null>(null);
+  // The database whose editor overlay is open, if any (see DatabaseEditorView).
+  const [editorTarget, setEditorTarget] = useState<DbEditorTarget | null>(null);
   // Apps registered as deployments (name → its registry entry). Containers
   // deployed by the app carry the app's name, so a match means this artifact's
   // project can be configured right here via the .env dialog.
@@ -225,6 +233,24 @@ export function ArtifactsView({
   useEffect(() => {
     loadCredentials();
   }, [loadCredentials]);
+
+  // "Open editor": the app is already SSH'd into the server, so the editor
+  // connects straight through — no password prompt. The backend authenticates
+  // via the container's local socket / native peer auth (and uses a saved
+  // credential automatically if one exists). We just hand it the database's
+  // identity. (See main/db-query.ts.)
+  const openEditor = useCallback(
+    (a: ServerArtifact) => {
+      setEditorTarget({
+        serverId,
+        engine: a.engine ?? 'postgresql',
+        host: a.remoteAccessible ? server?.host ?? '127.0.0.1' : '127.0.0.1',
+        port: a.ports?.[0] ?? DEFAULT_PORTS[a.engine ?? ''] ?? 0,
+        containerName: a.id.startsWith('container:') ? a.name : undefined,
+      });
+    },
+    [serverId, server?.host],
+  );
 
   // Jumps to the "Allow remote database access" wizard, pre-filled for this
   // one artifact — same pattern the sidebar uses to reopen a saved run.
@@ -467,6 +493,7 @@ export function ArtifactsView({
                       serverId={serverId}
                       artifact={a}
                       credential={matchCredential(a, credentials)}
+                      onOpenEditor={openEditor}
                       hasEnvFile={deployByApp.has(a.name)}
                       siteUrl={websiteUrl(a, server?.host)}
                       acting={acting?.id === a.id ? acting.action : null}
@@ -508,6 +535,13 @@ export function ArtifactsView({
           </div>
         )}
       </div>
+
+      {editorTarget && (
+        <DatabaseEditorView
+          target={editorTarget}
+          onClose={() => setEditorTarget(null)}
+        />
+      )}
 
       <DatabaseCredentialDialog
         target={dialogTarget}
@@ -562,10 +596,14 @@ function ArtifactRow({
   onOpenEnv,
   onRequestRemoteAccess,
   onOpenCredentials,
+  onOpenEditor,
 }: {
   serverId: string;
   artifact: ServerArtifact;
   credential?: DatabaseCredentialMeta;
+  /** Open the in-app database editor for this database (collecting credentials
+   *  first if none are saved yet). */
+  onOpenEditor: (artifact: ServerArtifact) => void;
   /** True when this artifact matches a registered deployment — shows the
    *  ".env" button that opens the Environment editor dialog for the project. */
   hasEnvFile: boolean;
@@ -749,6 +787,22 @@ function ArtifactRow({
           .env
         </Button>
       )}
+      {/* Open the lightweight database IDE — shown for any browsable SQL engine.
+          If credentials aren't saved yet, clicking it collects them first, then
+          opens the editor. */}
+      {artifact.kind === 'database' &&
+        SQL_EDITOR_ENGINES.has(artifact.engine ?? '') && (
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-7 shrink-0 gap-1.5 px-2.5 text-[11px]"
+            onClick={() => onOpenEditor(artifact)}
+            title="Browse tables and run SQL"
+          >
+            <TableIcon className="size-3.5" />
+            Open editor
+          </Button>
+        )}
       {artifact.kind === 'database' && (
         <Button
           variant={credProminent ? 'outline' : 'ghost'}

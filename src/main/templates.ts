@@ -21,12 +21,26 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { app } from 'electron';
 import { parse as parseToml } from 'smol-toml';
-import { TemplateMeta } from '../shared/ipc-types';
+import {
+  TemplateListRequest,
+  TemplateListResult,
+  TemplateMeta,
+} from '../shared/ipc-types';
 import { FALLBACK_TEMPLATES } from './templates-fallback';
 
 export const DEFAULT_TEMPLATE_REGISTRY = 'https://templates.dokploy.com';
 
 const FETCH_TIMEOUT_MS = 10_000;
+const CATALOG_MEMORY_TTL_MS = 5 * 60 * 1000;
+const DEFAULT_PAGE_SIZE = 15;
+const MAX_PAGE_SIZE = 30;
+
+let memoryCatalog:
+  | { baseUrl: string; templates: TemplateMeta[]; expiresAt: number }
+  | undefined;
+let catalogRequest:
+  | { baseUrl: string; promise: Promise<TemplateMeta[]> }
+  | undefined;
 
 // ---------------------------------------------------------------------------
 // Registry fetch + cache
@@ -117,27 +131,108 @@ function toMeta(raw: RegistryMeta, baseUrl: string): TemplateMeta {
 export async function listTemplates(
   baseUrl = DEFAULT_TEMPLATE_REGISTRY,
 ): Promise<TemplateMeta[]> {
-  try {
-    const text = await fetchText(`${baseUrl}/meta.json`);
-    const parsed = JSON.parse(text) as RegistryMeta[];
-    if (!Array.isArray(parsed) || parsed.length === 0) {
-      throw new Error('registry returned an empty template list');
-    }
-    await writeCache('meta.json', text);
-    return parsed.map((raw) => toMeta(raw, baseUrl));
-  } catch {
-    const cached = await readCache('meta.json');
-    if (cached) {
-      try {
-        return (JSON.parse(cached) as RegistryMeta[]).map((raw) =>
-          toMeta(raw, baseUrl),
-        );
-      } catch {
-        // fall through to the bundled set
-      }
-    }
-    return FALLBACK_TEMPLATES.map((t) => toMeta(t.meta, baseUrl));
+  if (
+    memoryCatalog?.baseUrl === baseUrl &&
+    memoryCatalog.expiresAt > Date.now()
+  ) {
+    return memoryCatalog.templates;
   }
+  if (catalogRequest?.baseUrl === baseUrl) return catalogRequest.promise;
+
+  const promise = (async () => {
+    let templates: TemplateMeta[] | undefined;
+    try {
+      const text = await fetchText(`${baseUrl}/meta.json`);
+      const parsed = JSON.parse(text) as RegistryMeta[];
+      if (!Array.isArray(parsed) || parsed.length === 0) {
+        throw new Error('registry returned an empty template list');
+      }
+      await writeCache('meta.json', text);
+      templates = parsed.map((raw) => toMeta(raw, baseUrl));
+    } catch {
+      const cached = await readCache('meta.json');
+      if (cached) {
+        try {
+          templates = (JSON.parse(cached) as RegistryMeta[]).map((raw) =>
+            toMeta(raw, baseUrl),
+          );
+        } catch {
+          // fall through to the bundled set
+        }
+      }
+      templates ??= FALLBACK_TEMPLATES.map((t) => toMeta(t.meta, baseUrl));
+    }
+    memoryCatalog = {
+      baseUrl,
+      templates,
+      expiresAt: Date.now() + CATALOG_MEMORY_TTL_MS,
+    };
+    return templates;
+  })();
+  catalogRequest = { baseUrl, promise };
+  try {
+    return await promise;
+  } finally {
+    if (catalogRequest?.promise === promise) catalogRequest = undefined;
+  }
+}
+
+/** Filter and slice a catalog without exposing the full registry to the UI. */
+export function paginateTemplates(
+  templates: TemplateMeta[],
+  request: TemplateListRequest = {},
+): TemplateListResult {
+  const requestedPage = Number.isFinite(request.page)
+    ? Math.max(1, Math.floor(request.page!))
+    : 1;
+  const pageSize = Number.isFinite(request.pageSize)
+    ? Math.min(MAX_PAGE_SIZE, Math.max(1, Math.floor(request.pageSize!)))
+    : DEFAULT_PAGE_SIZE;
+  const query = request.query?.trim().toLocaleLowerCase() ?? '';
+  const tag = request.tag?.trim() ?? '';
+  const templateId = request.templateId?.trim() ?? '';
+
+  const filtered = templates.filter((template) => {
+    if (templateId && template.id !== templateId) return false;
+    if (tag && !template.tags.includes(tag)) return false;
+    if (!query) return true;
+    return (
+      template.id.toLocaleLowerCase().includes(query) ||
+      template.name.toLocaleLowerCase().includes(query) ||
+      template.description.toLocaleLowerCase().includes(query) ||
+      template.tags.some((item) => item.toLocaleLowerCase().includes(query))
+    );
+  });
+
+  const total = filtered.length;
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  const page = Math.min(requestedPage, totalPages);
+  const offset = (page - 1) * pageSize;
+  const counts = new Map<string, number>();
+  for (const template of templates) {
+    for (const item of template.tags) {
+      counts.set(item, (counts.get(item) ?? 0) + 1);
+    }
+  }
+
+  return {
+    items: filtered.slice(offset, offset + pageSize),
+    page,
+    pageSize,
+    total,
+    totalPages,
+    tags: [...counts.entries()]
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+      .slice(0, 12)
+      .map(([item]) => item),
+  };
+}
+
+export async function listTemplatePage(
+  request: TemplateListRequest = {},
+  baseUrl = DEFAULT_TEMPLATE_REGISTRY,
+): Promise<TemplateListResult> {
+  return paginateTemplates(await listTemplates(baseUrl), request);
 }
 
 /**

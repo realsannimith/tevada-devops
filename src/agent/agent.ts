@@ -211,7 +211,24 @@ export function buildProviderOptions(cfg: AgentModelConfig): ProviderOptions {
   }
 }
 
-const SYSTEM_PROMPT = [
+const PLANNING_PROMPT_SECTION = [
+  'Planning & task list:',
+  '- For any job with more than ~3 steps (deploys, security audits, hardening, migrations), call updateTodos FIRST to lay out the plan as a checklist the user can watch, then update it as you go: mark exactly one item in_progress while you work it, flip it to completed the instant it is done, and keep the rest pending. Skip the checklist for simple one- or two-step requests.',
+  '',
+];
+
+/** The core operator prompt. Planning instructions are included only when the
+ *  user has the task-list feature on — with it off, the updateTodos tool does
+ *  not exist and its prompt text would only waste tokens and confuse. */
+export function buildSystemPrompt(planning: boolean): string {
+  const sections = planning
+    ? SYSTEM_PROMPT_SECTIONS
+    : SYSTEM_PROMPT_SECTIONS.filter((s) => s !== PLANNING_PROMPT_SECTION);
+  return sections.flat().join('\n');
+}
+
+const SYSTEM_PROMPT_SECTIONS: string[][] = [
+  [
   'You are Tevada DevOps, an expert DevOps operator embedded in a desktop app. You manage the user\'s Linux servers over SSH by calling tools. Your users are NOT DevOps experts — they tell you WHAT they want; you own the HOW, end to end. Never hand back a list of commands for the user to run themselves: run them.',
   '',
   'Targeting & connection:',
@@ -239,9 +256,9 @@ const SYSTEM_PROMPT = [
   '- Open firewall ports narrowly (only the needed port); never disable ufw/firewalld to "make it work".',
   '- Enable services at boot (systemctl enable --now) so a reboot does not take the user\'s app down.',
   '',
-  'Planning & task list:',
-  '- For any job with more than ~3 steps (deploys, security audits, hardening, migrations), call updateTodos FIRST to lay out the plan as a checklist the user can watch, then update it as you go: mark exactly one item in_progress while you work it, flip it to completed the instant it is done, and keep the rest pending. Skip the checklist for simple one- or two-step requests.',
-  '',
+  ],
+  PLANNING_PROMPT_SECTION,
+  [
   'Collecting input with on-screen forms:',
   '- When you need several related values from the user to do a job, prefer an on-screen form over asking for each value in plain text — it is far easier for a non-expert. For pointing a domain / custom URL at a service, call requestDomainSetup (it renders the domain form and returns the values); do not ask for the domain, port, HTTPS choice or email in chat. Load the setup-domain skill for the full flow.',
   '- For scheduling database backups, call requestDatabaseBackupSetup (load the setup-database-backup skill for the full flow). For connecting S3-compatible object storage — image/file uploads for an app, or off-site backup copies — call requestS3StorageSetup (load the setup-s3-storage skill). NEVER ask the user to paste access keys or secrets into chat: the form collects them masked, and you write them straight to a root-only file without ever repeating them.',
@@ -250,7 +267,8 @@ const SYSTEM_PROMPT = [
   '- After every milestone, VERIFY it actually works (curl -sSI localhost, systemctl is-active, a real client query for databases) before declaring success.',
   '- Give each runCommand/runScript a clear plain-English `description` — the user watches these to understand what is happening.',
   '- Finish with a plain-language summary a non-expert can act on: what you set up, exact URLs / connection strings / credentials they need to copy, how to try it, and any follow-ups (e.g. DNS records to add, ports you opened). Avoid jargon; explain any term you must use.',
-].join('\n');
+  ],
+];
 
 /**
  * Remind the model of the task list it already started, so a follow-up turn
@@ -277,6 +295,59 @@ export function buildTodoReminder(todos?: TodoItem[]): string {
     ...lines,
     'When you call updateTodos, you MUST include ALL of these items (keep their exact text and their completed/in-progress states) plus any changes — the tool REPLACES the whole list, so leaving an item out deletes it. Do not re-do tasks already marked [x] completed; continue from the first item that is not yet done.',
   ].join('\n');
+}
+
+// --- In-run context compaction ---------------------------------------------
+// The tool loop re-sends the ENTIRE step history to the model on every step, so
+// a long run pays for every old tool result again and again — by far the
+// biggest token cost in the app. Old tool outputs rarely matter once acted on
+// (the model already reacted to them), so all but the most recent few are
+// compacted to a short head excerpt before each step.
+
+/** Keep this many most-recent tool-result messages at full size. */
+const PRUNE_KEEP_RECENT = 6;
+/** Older tool outputs larger than this are cut down to roughly this size. */
+const PRUNE_MAX_CHARS = 600;
+
+/**
+ * Compact old tool results in a step-message history. Pure + non-mutating so
+ * it is unit-testable; unknown message shapes pass through untouched.
+ */
+export function pruneToolResults(
+  messages: ModelMessage[],
+  keepRecent = PRUNE_KEEP_RECENT,
+  maxChars = PRUNE_MAX_CHARS,
+): ModelMessage[] {
+  const toolIndices = messages
+    .map((m, i) => (m.role === 'tool' ? i : -1))
+    .filter((i) => i >= 0);
+  const pruneBefore = new Set(toolIndices.slice(0, -keepRecent || undefined));
+  if (pruneBefore.size === 0) return messages;
+
+  return messages.map((message, index) => {
+    if (!pruneBefore.has(index) || !Array.isArray(message.content)) {
+      return message;
+    }
+    const content = message.content.map((part) => {
+      if (part.type !== 'tool-result') return part;
+      const output = part.output;
+      const raw =
+        output?.type === 'text' || output?.type === 'error-text'
+          ? output.value
+          : output?.type === 'json' || output?.type === 'error-json'
+            ? JSON.stringify(output.value)
+            : null;
+      if (raw === null || raw.length <= maxChars) return part;
+      return {
+        ...part,
+        output: {
+          type: 'text' as const,
+          value: `${raw.slice(0, maxChars)}\n…[older tool output trimmed to save context — ${raw.length - maxChars} chars omitted; re-run the command if you need it again]`,
+        },
+      };
+    });
+    return { ...message, content } as ModelMessage;
+  });
 }
 
 type RunHandle = {
@@ -308,6 +379,9 @@ export type StartAgentRunOptions = {
   emit: (event: AgentEvent) => void;
   /** The session's current task list, so a continued run keeps earlier tasks. */
   todos?: TodoItem[];
+  /** Task-list planning on/off (settings.aiPlanning). Off removes the
+   *  updateTodos tool, its prompt section, and the per-turn todo reminder. */
+  planning?: boolean;
   /**
    * Project context preamble injected into the system prompt when the chat is
    * tagged to a project: the project's name, its "memory" notes, and the servers
@@ -435,20 +509,26 @@ export function startAgentRun(opts: StartAgentRunOptions): void {
   toolContext.abortSignal = abort.signal;
 
   const model = createModel(modelConfig);
+  const planning = opts.planning !== false;
+  toolContext.planning = planning;
   // Skills are re-read per run so user skills in ~/.easyhost/skills apply
   // immediately; only their one-line descriptions enter the system prompt.
   const skills = loadSkills();
   const agent = new ToolLoopAgent({
     model,
     providerOptions: buildProviderOptions(modelConfig),
-    instructions: `${SYSTEM_PROMPT}\n\n${skillsPromptSection(skills)}${opts.projectContext ?? ''}${buildTodoReminder(opts.todos)}`,
+    instructions: `${buildSystemPrompt(planning)}\n\n${skillsPromptSection(skills)}${opts.projectContext ?? ''}${planning ? buildTodoReminder(opts.todos) : ''}`,
     tools: { ...buildTools(toolContext), ...buildSkillTool(skills, emit) },
     stopWhen: stepCountIs(maxSteps),
-    // Steering: before each reasoning step, fold any pending steer messages in
-    // as fresh user turns so the agent redirects without aborting current work.
+    // Before each reasoning step: compact old tool outputs (the tool loop
+    // re-sends the whole history every step — see pruneToolResults), then fold
+    // in any pending steer messages as fresh user turns.
     prepareStep: ({ messages: stepMessages }) => {
-      if (steerQueue.length === 0) return {};
-      return { messages: injectSteerMessages(stepMessages, steerQueue.splice(0)) };
+      const pruned = pruneToolResults(stepMessages);
+      if (steerQueue.length === 0) {
+        return pruned === stepMessages ? {} : { messages: pruned };
+      }
+      return { messages: injectSteerMessages(pruned, steerQueue.splice(0)) };
     },
   });
 

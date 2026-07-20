@@ -275,8 +275,10 @@
         }
     }
 
+    /* Near-solid: menus/selects must stay readable over any content — the
+       blur supplies the glass feel, the fill does the legibility work. */
     .glass-popover {
-        background-color: color-mix(in srgb, var(--popover) 82%, transparent);
+        background-color: color-mix(in srgb, var(--popover) 96%, transparent);
         backdrop-filter: blur(32px) saturate(var(--glass-saturate));
         -webkit-backdrop-filter: blur(32px) saturate(var(--glass-saturate));
     }
@@ -441,6 +443,7 @@
             [data-slot="alert-dialog-overlay"],
             [data-slot="alert-dialog-content"],
             [data-slot="dropdown-menu-content"],
+            [data-slot="dropdown-menu-sub-content"],
             [data-slot="select-content"],
             [data-slot="tooltip-content"]
         ) {

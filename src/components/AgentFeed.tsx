@@ -52,7 +52,6 @@ import type {
   ChatAttachment,
   ChatFormHistoryItem,
   ChatReasoningHistoryItem,
-  ChatTodoHistoryItem,
   DnsGuideConfig,
   FormField,
   TodoItem,
@@ -91,24 +90,12 @@ export function AgentFeed({
     (feed.length === 0 ||
       (lastItem?.kind !== 'reasoning' &&
         (lastItem?.kind !== 'tool' || lastItem.status !== 'running')));
-  // The agent's live task list (there's only ever one). Pinned as an
-  // always-visible summary above the transcript so its progress stays in view
-  // while text and tool cards stream past below it — RooCode's "task header"
-  // pattern, the fix for a checklist that would otherwise scroll off-screen.
-  // Once every task is done the plan is finished, so the bar closes itself
-  // rather than lingering as a "complete" banner.
-  const todos = feed.find(
-    (it): it is ChatTodoHistoryItem => it.kind === 'todos',
-  )?.todos;
-  const showTodoBar =
-    !!todos && todos.length > 0 && !todos.every((t) => t.status === 'completed');
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
   }, [feed, error, showRunningRow]);
 
   return (
     <>
-      {showTodoBar && <TodoStatusBar todos={todos} />}
       <div
         ref={scrollRef}
         className="flex-1 overflow-y-auto bg-background p-4"
@@ -171,9 +158,10 @@ export function AgentFeed({
               live={running && index === feed.length - 1}
             />
           ) : item.kind === 'todos' ? (
-            // The task list renders once, in the pinned TodoStatusBar above —
-            // no redundant inline card (RooCode dropped the repeated block too).
-            null
+            // The plan lives IN the transcript (not pinned over it) so it
+            // scrolls naturally with the conversation; it collapses to a
+            // one-line summary once every task is done.
+            <TodoPlanCard key="plan" todos={item.todos} />
           ) : item.kind === 'form' ? (
             <FormCard
               key={item.formId}
@@ -206,7 +194,7 @@ export function AgentFeed({
           </p>
         )}
         {error && (
-          <p className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+          <p className="whitespace-pre-wrap [overflow-wrap:anywhere] rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
             {error}
           </p>
         )}
@@ -294,28 +282,32 @@ function TodoRows({ todos }: { todos: TodoItem[] }) {
 }
 
 /**
- * Pinned task summary above the transcript (RooCode's "task header" pattern).
- * Stays visible while the conversation streams past below, so the user always
- * sees current progress + the task in flight without scrolling to find the
- * checklist. Click to expand the full list inline.
+ * The agent's plan as an inline transcript card. It scrolls with the
+ * conversation like every other card — no pinned chrome over the feed. While
+ * tasks are open it defaults to expanded (the checklist is the point); once
+ * everything completes it folds down to a one-line "n/n done" summary the user
+ * can reopen. Progress reads from the slim bar + the in-flight task line.
  */
-function TodoStatusBar({ todos }: { todos: TodoItem[] }) {
-  const [open, setOpen] = useState(false);
+function TodoPlanCard({ todos }: { todos: TodoItem[] }) {
   const { done, total, active, allDone, pct } = todoProgress(todos);
+  // null = follow the default (open while active, collapsed when done);
+  // a click pins the user's explicit choice.
+  const [openOverride, setOpenOverride] = useState<boolean | null>(null);
+  const open = openOverride ?? !allDone;
 
   return (
-    <div className="chat-surface-divider shrink-0 bg-background px-4 py-2">
-      {/* Centered to the same column as the messages + composer. */}
-      <div className="mx-auto w-full max-w-[46rem]">
+    <div className="surface-panel max-w-[85%] px-3.5 py-2.5">
       <button
         type="button"
-        onClick={() => setOpen((v) => !v)}
+        onClick={() => setOpenOverride(!open)}
         className="flex w-full items-center gap-2 text-left"
         aria-expanded={open}
         title={open ? 'Hide task list' : 'Show task list'}
       >
         <ChecklistIcon aria-hidden className="size-4 shrink-0 text-muted-foreground" />
-        <span className="shrink-0 text-xs font-medium text-ink">Tasks</span>
+        <span className="shrink-0 text-xs font-medium tracking-[-0.015em] text-ink">
+          Plan
+        </span>
         <span className="shrink-0 tabular-nums text-[11px] text-muted-foreground/70">
           {done}/{total}
         </span>
@@ -324,7 +316,7 @@ function TodoStatusBar({ todos }: { todos: TodoItem[] }) {
             <span className="truncate text-[11px] font-medium text-success">
               All tasks complete
             </span>
-          ) : active ? (
+          ) : active && !open ? (
             <>
               <Loader2Icon
                 aria-hidden
@@ -334,11 +326,7 @@ function TodoStatusBar({ todos }: { todos: TodoItem[] }) {
                 {active.text}
               </span>
             </>
-          ) : (
-            <span className="truncate text-[11px] text-muted-foreground/70">
-              {total === 0 ? 'No tasks yet' : 'Planning…'}
-            </span>
-          )}
+          ) : null}
         </span>
         <ChevronRightIcon
           aria-hidden
@@ -348,7 +336,7 @@ function TodoStatusBar({ todos }: { todos: TodoItem[] }) {
           )}
         />
       </button>
-      <div className="mt-1.5 h-1 w-full overflow-hidden rounded-full bg-secondary">
+      <div className="mt-2 h-1 w-full overflow-hidden rounded-full bg-secondary">
         <div
           className={cn(
             'h-full rounded-full transition-all duration-300',
@@ -362,7 +350,6 @@ function TodoStatusBar({ todos }: { todos: TodoItem[] }) {
           <TodoRows todos={todos} />
         </div>
       )}
-      </div>
     </div>
   );
 }

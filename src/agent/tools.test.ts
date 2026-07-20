@@ -178,3 +178,18 @@ describe('requestS3StorageSetup', () => {
     expect(res).toMatchObject({ submitted: false });
   });
 });
+
+describe('planning gate', () => {
+  it('removes updateTodos when planning is off, keeps it on by default', () => {
+    const base = {
+      cm: { exec: vi.fn() },
+      approvalMode: false,
+      emit: vi.fn(),
+      requestApproval: vi.fn(),
+    } as unknown as AgentToolContext;
+    expect('updateTodos' in buildTools(base)).toBe(true);
+    expect(
+      'updateTodos' in buildTools({ ...base, planning: false }),
+    ).toBe(false);
+  });
+});

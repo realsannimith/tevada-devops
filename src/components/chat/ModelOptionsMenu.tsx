@@ -199,6 +199,21 @@ export function ModelOptionsMenu() {
             className="pointer-events-none data-[state=checked]:bg-success"
           />
         </DropdownMenuItem>
+        <DropdownMenuItem
+          onSelect={(e) => {
+            e.preventDefault();
+            void patch({ aiPlanning: !settings.aiPlanning });
+          }}
+          className="justify-between"
+          title="Task-list planning: the agent lays out and updates a checklist for multi-step jobs. Turning it off saves tokens."
+        >
+          Planning
+          <Switch
+            checked={settings.aiPlanning}
+            aria-label="Task-list planning"
+            className="pointer-events-none data-[state=checked]:bg-success"
+          />
+        </DropdownMenuItem>
         <DropdownMenuSeparator />
         <DropdownMenuLabel>Effort</DropdownMenuLabel>
         {EFFORT_LEVELS.map((level) => {

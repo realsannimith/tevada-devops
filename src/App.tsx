@@ -19,8 +19,16 @@ import { TunnelsView } from '@/components/TunnelsView';
 import { Button } from '@/components/ui/button';
 import {
   AlertTriangleIcon,
+  ChartBarIcon,
   CheckIcon,
+  CloudUploadIcon,
+  FolderOpenIcon,
   Loader2Icon,
+  NetworkIcon,
+  PackageIcon,
+  PencilIcon,
+  ServerIcon,
+  TerminalIcon,
   WifiIcon,
   WifiOffIcon,
 } from '@/lib/icons';
@@ -35,13 +43,17 @@ export type ServerTab =
   | 'deploys'
   | 'tunnels';
 
-const SERVER_TAB_ITEMS: { value: ServerTab; label: string }[] = [
-  { value: 'terminal', label: 'Terminal' },
-  { value: 'files', label: 'Files' },
-  { value: 'monitoring', label: 'Monitoring' },
-  { value: 'artifacts', label: 'Artifacts' },
-  { value: 'deploys', label: 'Deploys' },
-  { value: 'tunnels', label: 'Tunnels' },
+const SERVER_TAB_ITEMS: {
+  value: ServerTab;
+  label: string;
+  icon: typeof TerminalIcon;
+}[] = [
+  { value: 'terminal', label: 'Terminal', icon: TerminalIcon },
+  { value: 'files', label: 'Files', icon: FolderOpenIcon },
+  { value: 'monitoring', label: 'Monitoring', icon: ChartBarIcon },
+  { value: 'artifacts', label: 'Artifacts', icon: PackageIcon },
+  { value: 'deploys', label: 'Deploys', icon: CloudUploadIcon },
+  { value: 'tunnels', label: 'Tunnels', icon: NetworkIcon },
 ];
 
 export type View =
@@ -89,7 +101,7 @@ function Shell() {
     setView(v);
   };
 
-  /** Close a session tab (the SSH connection is left as-is — reopening the
+  /** Close a session tab (the SSH connection is left as-is; reopening the
    *  host reattaches to the live terminal). Focus falls to the neighbor tab. */
   const closeSessionTab = (serverId: string) => {
     const idx = sessionTabs.findIndex((t) => t.serverId === serverId);
@@ -177,7 +189,7 @@ function Shell() {
           onNewSession={() => navigate({ kind: 'dashboard' })}
         />
 
-        {/* Inset content card — floats with an even gutter (the tab strip
+        {/* Inset content card floats with an even gutter (the tab strip
             provides the top gap) so the frosted rail and the surface never
             crowd each other. */}
         <main className="flex-1 overflow-hidden px-1.5 pb-1.5">
@@ -252,87 +264,154 @@ function ServerPane({
   const status = statusOf(server.id);
   const error = errorOf(server.id);
   const connected = status === 'connected';
+  const selectServerTab = (tab: ServerTab) => {
+    onNavigate({ kind: 'server', serverId: server.id, tab });
+  };
+  const focusServerTab = (index: number) => {
+    const item = SERVER_TAB_ITEMS[index];
+    if (!item) return;
+    selectServerTab(item.value);
+    requestAnimationFrame(() => {
+      document
+        .getElementById(`server-tool-tab-${server.id}-${item.value}`)
+        ?.focus();
+    });
+  };
 
   return (
     <div className="flex h-full flex-col">
-      <header className="flex items-center justify-between px-5 py-3">
-        <div className="flex items-center gap-2.5">
-          <div>
-            <div className="flex items-center gap-2">
+      <header className="chat-surface-divider flex min-h-14 shrink-0 items-center justify-between gap-4 px-4 py-2.5 sm:px-5">
+        <div className="flex min-w-0 items-center gap-3">
+          <div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-secondary text-muted-foreground">
+            <ServerIcon aria-hidden className="size-4" />
+          </div>
+          <div className="min-w-0">
+            <div className="flex min-w-0 items-center gap-2">
               <h1 className="text-sm font-semibold tracking-[-0.015em] text-ink">
                 {server.name}
               </h1>
               <ConnStatusPill status={status} />
             </div>
-            <p className="font-mono text-[11px] text-muted-foreground">
+            <p className="truncate font-mono text-[11px] text-muted-foreground">
               {server.username}@{server.host}:{server.port}
             </p>
-            {status === 'error' && error && (
-              <div className="mt-1 flex max-w-xl flex-wrap items-center gap-2">
-                <p className="text-[11px] leading-snug text-destructive">
-                  {error}
-                </p>
-                <Button
-                  variant="outline"
-                  size="xs"
-                  onClick={() => onEditServer(server.id)}
-                >
-                  Update credentials
-                </Button>
-              </div>
-            )}
           </div>
         </div>
-        <div className="flex items-center gap-2.5">
+        <div className="flex shrink-0 items-center gap-1.5">
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-sm"
+            aria-label="Edit server"
+            title="Edit server"
+            onClick={() => onEditServer(server.id)}
+          >
+            <PencilIcon aria-hidden />
+          </Button>
           {connected ? (
             <Button
+              type="button"
               variant="outline"
               size="sm"
               onClick={() => disconnect(server.id)}
             >
-              <WifiOffIcon className="size-4" /> Disconnect
+              <WifiOffIcon aria-hidden className="size-4" /> Disconnect
             </Button>
           ) : (
             <Button
+              type="button"
+              variant="prominent"
               size="sm"
               onClick={() => connect(server.id)}
               disabled={status === 'connecting'}
             >
-              <WifiIcon className="size-4" />
+              {status === 'connecting' ? (
+                <Loader2Icon aria-hidden className="size-4 animate-spin" />
+              ) : (
+                <WifiIcon aria-hidden className="size-4" />
+              )}
               {status === 'connecting' ? 'Connecting…' : 'Connect'}
             </Button>
           )}
         </div>
       </header>
 
-      {/* Underline tab row (the header's divider doubles as its baseline) —
-          full-width with a 2px accent on the active tab, instead of the old
-          pill TabsList squeezed into the header. */}
-      <nav role="tablist" className="flex shrink-0 gap-1 border-b border-border px-3">
-        {SERVER_TAB_ITEMS.map(({ value, label }) => (
-          <button
-            key={value}
+      {status === 'error' && error && (
+        <div
+          role="alert"
+          className="chat-surface-divider flex shrink-0 items-center justify-between gap-4 bg-destructive/5 px-4 py-2 sm:px-5"
+        >
+          <div className="flex min-w-0 items-center gap-2 text-[11px] text-destructive">
+            <AlertTriangleIcon aria-hidden className="size-3.5 shrink-0" />
+            <span className="truncate">{error}</span>
+          </div>
+          <Button
             type="button"
-            role="tab"
-            aria-selected={view.tab === value}
-            onClick={() =>
-              onNavigate({ kind: 'server', serverId: server.id, tab: value })
-            }
-            className={cn(
-              '-mb-px border-b-2 px-2.5 py-2 text-xs transition-colors',
-              view.tab === value
-                ? 'border-primary text-ink'
-                : 'border-transparent text-muted-foreground hover:text-ink',
-            )}
+            variant="outline"
+            size="xs"
+            onClick={() => onEditServer(server.id)}
           >
-            {label}
-          </button>
-        ))}
+            Update credentials
+          </Button>
+        </div>
+      )}
+
+      <nav
+        role="tablist"
+        aria-label={`${server.name} tools`}
+        className="chat-surface-divider flex shrink-0 items-center gap-1 overflow-x-auto px-3 py-1.5"
+      >
+        {SERVER_TAB_ITEMS.map(({ value, label, icon: Icon }, index) => {
+          const active = view.tab === value;
+          return (
+            <button
+              id={`server-tool-tab-${server.id}-${value}`}
+              key={value}
+              type="button"
+              role="tab"
+              aria-selected={active}
+              aria-controls={`server-tool-panel-${server.id}-${value}`}
+              tabIndex={active ? 0 : -1}
+              onClick={() => selectServerTab(value)}
+              onKeyDown={(event) => {
+                if (event.key === 'ArrowLeft') {
+                  event.preventDefault();
+                  focusServerTab(
+                    (index - 1 + SERVER_TAB_ITEMS.length) % SERVER_TAB_ITEMS.length,
+                  );
+                } else if (event.key === 'ArrowRight') {
+                  event.preventDefault();
+                  focusServerTab((index + 1) % SERVER_TAB_ITEMS.length);
+                } else if (event.key === 'Home') {
+                  event.preventDefault();
+                  focusServerTab(0);
+                } else if (event.key === 'End') {
+                  event.preventDefault();
+                  focusServerTab(SERVER_TAB_ITEMS.length - 1);
+                }
+              }}
+              className={cn(
+                'flex h-7 shrink-0 items-center gap-1.5 rounded-lg px-2.5 text-xs outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring/40',
+                active
+                  ? 'bg-secondary font-medium text-ink'
+                  : 'text-muted-foreground hover:bg-accent/60 hover:text-ink',
+              )}
+            >
+              <Icon aria-hidden className={cn('size-3.5', active && 'text-primary')} />
+              {label}
+            </button>
+          );
+        })}
       </nav>
 
       <div className="flex-1 overflow-hidden">
-        {/* Keyed so each tab switch replays the soft entrance. */}
-        <div key={view.tab} className="view-enter h-full">
+        <div
+          id={`server-tool-panel-${server.id}-${view.tab}`}
+          key={view.tab}
+          role="tabpanel"
+          aria-labelledby={`server-tool-tab-${server.id}-${view.tab}`}
+          className="view-enter h-full outline-none"
+        >
           {view.tab === 'terminal' ? (
             <TerminalView serverId={server.id} />
           ) : view.tab === 'files' ? (
@@ -352,8 +431,7 @@ function ServerPane({
   );
 }
 
-/** Render-style connection badge ("✓ Connected") — replaces the old status
- *  dot; working states get a spinner instead of a pulse. */
+/** Compact semantic connection badge. Working states get a spinner. */
 const CONN_PILL: Record<
   ConnStatus,
   { label: string; cls: string; icon?: typeof CheckIcon; spin?: boolean }
@@ -366,7 +444,11 @@ const CONN_PILL: Record<
     spin: true,
   },
   error: { label: 'Error', cls: 'bg-destructive/10 text-destructive', icon: AlertTriangleIcon },
-  disconnected: { label: 'Offline', cls: 'bg-secondary text-muted-foreground' },
+  disconnected: {
+    label: 'Offline',
+    cls: 'bg-secondary text-muted-foreground',
+    icon: WifiOffIcon,
+  },
 };
 
 function ConnStatusPill({ status }: { status: ConnStatus }) {

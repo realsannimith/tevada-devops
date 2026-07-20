@@ -25,6 +25,13 @@ import {
   ContainerCredentialGuess,
   DatabaseCredential,
   DatabaseCredentialMeta,
+  DbColumnsResult,
+  DbEditorTarget,
+  DbGraphResult,
+  DbRunResult,
+  DbSelectResult,
+  DbTablesResult,
+  DbUpdateResult,
   DeployLogResult,
   LogDataEvent,
   LogExitEvent,
@@ -52,7 +59,8 @@ import {
   MonitorStatsEvent,
   PlaybookMeta,
   TemplateDeployEvent,
-  TemplateMeta,
+  TemplateListRequest,
+  TemplateListResult,
   Project,
   SaveDatabaseCredentialRequest,
   ServerAlertConfig,
@@ -267,7 +275,8 @@ const easyhost = {
   },
 
   templates: {
-    list: (): Promise<TemplateMeta[]> => ipcRenderer.invoke(IPC.templatesList),
+    list: (request?: TemplateListRequest): Promise<TemplateListResult> =>
+      ipcRenderer.invoke(IPC.templatesList, request),
     deploy: (
       deployId: string,
       serverId: string,
@@ -361,6 +370,43 @@ const easyhost = {
         containerName,
         engine,
       }),
+  },
+
+  // Lightweight database editor (the in-app DB IDE). Every call targets a saved
+  // credential by id; the main process runs psql/mysql over SSH to answer.
+  db: {
+    tables: (target: DbEditorTarget): Promise<DbTablesResult> =>
+      ipcRenderer.invoke(IPC.dbTables, { target }),
+    columns: (
+      target: DbEditorTarget,
+      schema: string,
+      table: string,
+    ): Promise<DbColumnsResult> =>
+      ipcRenderer.invoke(IPC.dbColumns, { target, schema, table }),
+    select: (
+      target: DbEditorTarget,
+      schema: string,
+      table: string,
+      opts?: {
+        limit?: number;
+        offset?: number;
+        orderBy?: { column: string; dir: 'asc' | 'desc' };
+      },
+    ): Promise<DbSelectResult> =>
+      ipcRenderer.invoke(IPC.dbSelect, { target, schema, table, ...opts }),
+    query: (target: DbEditorTarget, sql: string): Promise<DbRunResult> =>
+      ipcRenderer.invoke(IPC.dbQuery, { target, sql }),
+    graph: (target: DbEditorTarget): Promise<DbGraphResult> =>
+      ipcRenderer.invoke(IPC.dbGraph, { target }),
+    updateCell: (
+      target: DbEditorTarget,
+      schema: string,
+      table: string,
+      pk: { column: string; value: string | null }[],
+      column: string,
+      value: string | null,
+    ): Promise<DbUpdateResult> =>
+      ipcRenderer.invoke(IPC.dbUpdateCell, { target, schema, table, pk, column, value }),
   },
 
   github: {

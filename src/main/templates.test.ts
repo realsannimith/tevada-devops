@@ -10,6 +10,7 @@ import { parse as parseToml } from 'smol-toml';
 import {
   buildTemplatePrompt,
   generateRandomDomain,
+  paginateTemplates,
   processTemplate,
   processValue,
   TemplateConfig,
@@ -17,6 +18,44 @@ import {
 import { FALLBACK_TEMPLATES } from './templates-fallback';
 
 const schema = { serverIp: '203.0.113.7', projectName: 'uptime-kuma' };
+
+describe('template catalog pagination', () => {
+  const templates = Array.from({ length: 38 }, (_, index) => ({
+    id: `app-${index + 1}`,
+    name: index === 20 ? 'Special Analytics' : `App ${index + 1}`,
+    version: 'latest',
+    description: index === 20 ? 'Private web analytics' : 'A useful app',
+    links: {},
+    tags: index % 2 === 0 ? ['database'] : ['monitoring'],
+  }));
+
+  it('returns only the requested page with accurate totals', () => {
+    const result = paginateTemplates(templates, { page: 2, pageSize: 15 });
+    expect(result.items).toHaveLength(15);
+    expect(result.items[0].id).toBe('app-16');
+    expect(result.total).toBe(38);
+    expect(result.totalPages).toBe(3);
+  });
+
+  it('searches metadata before slicing and returns common tags', () => {
+    const result = paginateTemplates(templates, {
+      query: 'analytics',
+      pageSize: 15,
+    });
+    expect(result.items.map((item) => item.id)).toEqual(['app-21']);
+    expect(result.total).toBe(1);
+    expect(result.tags).toEqual(['database', 'monitoring']);
+  });
+
+  it('can resolve one exact template for saved deploy history', () => {
+    const result = paginateTemplates(templates, {
+      templateId: 'app-31',
+      pageSize: 1,
+    });
+    expect(result.items).toHaveLength(1);
+    expect(result.items[0].id).toBe('app-31');
+  });
+});
 
 describe('template variable processing', () => {
   it('expands ${domain} into an sslip.io hostname carrying the server ip', () => {

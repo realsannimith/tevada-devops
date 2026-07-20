@@ -34,12 +34,14 @@ import {
   ArrowLeftIcon,
   CheckIcon,
   CircleCheckFilledIcon,
+  ChevronRightIcon,
   CopyIcon,
   DeviceLaptopIcon,
   ExternalLinkIcon,
   EyeIcon,
   EyeOffIcon,
   Loader2Icon,
+  PackageIcon,
   PlayIcon,
   WifiIcon,
   WizardsIcon,
@@ -70,6 +72,21 @@ const SECTION_LABEL_CLASS =
   'mb-3 text-xs font-semibold tracking-[-0.015em] text-ink';
 const FIELD_CONTROL_CLASS =
   'w-full border-border bg-secondary shadow-none hover:bg-accent focus-visible:border-foreground/30 dark:bg-secondary dark:hover:bg-accent';
+const TEMPLATE_PAGE_SIZE = 15;
+
+function paginationPages(page: number, totalPages: number): Array<number | string> {
+  if (totalPages <= 7) {
+    return Array.from({ length: totalPages }, (_, index) => index + 1);
+  }
+  const pages: Array<number | string> = [1];
+  const start = Math.max(2, page - 1);
+  const end = Math.min(totalPages - 1, page + 1);
+  if (start > 2) pages.push('ellipsis-start');
+  for (let item = start; item <= end; item += 1) pages.push(item);
+  if (end < totalPages - 1) pages.push('ellipsis-end');
+  pages.push(totalPages);
+  return pages;
+}
 
 /** Per-wizard glyph so each card reads at a glance; falls back to the generic tool icon. */
 const PLAYBOOK_GLYPHS: Record<string, AppIcon> = {
@@ -132,8 +149,8 @@ function deployAsHistoryItems(deploy: ActiveDeploy): ChatTextHistoryItem[] {
   ];
 }
 
-/** Registry-hosted app logo with a quiet glyph fallback when the image is
- *  missing or the registry is unreachable. */
+/** Registry-hosted brand mark in a consistent neutral frame. A real package
+ *  glyph replaces broken images without pretending to be the app's logo. */
 function TemplateLogo({
   template,
   className,
@@ -142,26 +159,28 @@ function TemplateLogo({
   className?: string;
 }) {
   const [failed, setFailed] = useState(false);
-  if (!template.logoUrl || failed) {
-    return (
-      <span
-        className={cn(
-          'skill-chip flex items-center justify-center rounded-lg',
-          className,
-        )}
-      >
-        <SidebarGlyph icon={WizardsIcon} variant="leading" />
-      </span>
-    );
-  }
   return (
-    <img
-      src={template.logoUrl}
-      alt=""
-      loading="lazy"
-      onError={() => setFailed(true)}
-      className={cn('rounded-lg object-contain', className)}
-    />
+    <span
+      className={cn(
+        'flex shrink-0 items-center justify-center overflow-hidden rounded-[10px] border border-border/70 bg-white p-1.5 dark:border-white/10',
+        className,
+      )}
+      aria-hidden="true"
+    >
+      {template.logoUrl && !failed ? (
+        <img
+          src={template.logoUrl}
+          alt=""
+          loading="lazy"
+          decoding="async"
+          draggable={false}
+          onError={() => setFailed(true)}
+          className="size-full object-contain"
+        />
+      ) : (
+        <PackageIcon className="size-[58%] text-muted-foreground/70" />
+      )}
+    </span>
   );
 }
 
@@ -200,7 +219,15 @@ export function WizardsView() {
   );
   const [templates, setTemplates] = useState<TemplateMeta[]>([]);
   const [templateQuery, setTemplateQuery] = useState('');
+  const [templateSearch, setTemplateSearch] = useState('');
   const [activeTag, setActiveTag] = useState<string | null>(null);
+  const [templatePage, setTemplatePage] = useState(1);
+  const [templateTotal, setTemplateTotal] = useState(0);
+  const [templateTotalPages, setTemplateTotalPages] = useState(1);
+  const [topTags, setTopTags] = useState<string[]>([]);
+  const [templatesLoading, setTemplatesLoading] = useState(true);
+  const [templatesError, setTemplatesError] = useState<string | null>(null);
+  const [templateRefresh, setTemplateRefresh] = useState(0);
   const [values, setValues] = useState<Record<string, string>>({});
   const [serverId, setServerId] = useState<string>('');
   // The run whose transcript is (or was) streaming into the feed. Stays set
@@ -240,8 +267,48 @@ export function WizardsView() {
 
   useEffect(() => {
     window.easyhost.playbooks.list().then(setPlaybooks).catch(() => {});
-    window.easyhost.templates.list().then(setTemplates).catch(() => {});
   }, []);
+
+  useEffect(() => {
+    const timeout = window.setTimeout(
+      () => setTemplateSearch(templateQuery.trim()),
+      220,
+    );
+    return () => window.clearTimeout(timeout);
+  }, [templateQuery]);
+
+  useEffect(() => {
+    let disposed = false;
+    setTemplatesLoading(true);
+    setTemplatesError(null);
+    window.easyhost.templates
+      .list({
+        page: templatePage,
+        pageSize: TEMPLATE_PAGE_SIZE,
+        query: templateSearch || undefined,
+        tag: activeTag ?? undefined,
+      })
+      .then((result) => {
+        if (disposed) return;
+        setTemplates(result.items);
+        setTemplatePage(result.page);
+        setTemplateTotal(result.total);
+        setTemplateTotalPages(result.totalPages);
+        setTopTags(result.tags);
+      })
+      .catch((err: unknown) => {
+        if (disposed) return;
+        setTemplatesError(
+          err instanceof Error ? err.message : 'Could not load templates.',
+        );
+      })
+      .finally(() => {
+        if (!disposed) setTemplatesLoading(false);
+      });
+    return () => {
+      disposed = true;
+    };
+  }, [templatePage, templateSearch, activeTag, templateRefresh]);
 
   // Keep the sidebar's "Wizards" running indicator in sync from any screen.
   useEffect(() => {
@@ -326,31 +393,6 @@ export function WizardsView() {
     return map;
   }, [wizardSessions]);
 
-  // Most-used tags across the catalog, for the gallery's filter chip row.
-  const topTags = useMemo(() => {
-    const counts = new Map<string, number>();
-    for (const t of templates) {
-      for (const tag of t.tags) counts.set(tag, (counts.get(tag) ?? 0) + 1);
-    }
-    return [...counts.entries()]
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 12)
-      .map(([tag]) => tag);
-  }, [templates]);
-
-  const filteredTemplates = useMemo(() => {
-    const q = templateQuery.trim().toLowerCase();
-    return templates.filter((t) => {
-      if (activeTag && !t.tags.includes(activeTag)) return false;
-      if (!q) return true;
-      return (
-        t.name.toLowerCase().includes(q) ||
-        t.description.toLowerCase().includes(q) ||
-        t.tags.some((tag) => tag.toLowerCase().includes(q))
-      );
-    });
-  }, [templates, templateQuery, activeTag]);
-
   const buildRunSession = (
     run: ActiveWizardRun,
     status: ChatSessionStatus,
@@ -428,13 +470,19 @@ export function WizardsView() {
   }, []);
 
   /** Open a saved wizard run's transcript (read-only; nothing is re-run). */
-  function loadSavedRun(session: ChatSession) {
-    const template = session.playbookId?.startsWith(TEMPLATE_PLAYBOOK_PREFIX)
-      ? templates.find(
-          (t) =>
-            t.id === session.playbookId!.slice(TEMPLATE_PLAYBOOK_PREFIX.length),
-        ) ?? null
+  async function loadSavedRun(session: ChatSession) {
+    const templateId = session.playbookId?.startsWith(TEMPLATE_PLAYBOOK_PREFIX)
+      ? session.playbookId.slice(TEMPLATE_PLAYBOOK_PREFIX.length)
       : null;
+    let template = templateId
+      ? templates.find((item) => item.id === templateId) ?? null
+      : null;
+    if (templateId && !template) {
+      template = await window.easyhost.templates
+        .list({ templateId, pageSize: 1 })
+        .then((result) => result.items[0] ?? null)
+        .catch((): null => null);
+    }
     const playbook =
       (template && templateAsPlaybook(template)) ??
       playbooks.find((p) => p.id === session.playbookId) ??
@@ -478,7 +526,7 @@ export function WizardsView() {
         const session = state.sessions.find(
           (s) => s.id === id && s.kind === 'wizard',
         );
-        if (session) loadSavedRun(session);
+        if (session) void loadSavedRun(session);
       });
     };
     window.addEventListener(WIZARD_SESSION_SWITCH_EVENT, handleSwitch);
@@ -723,8 +771,12 @@ export function WizardsView() {
             </div>
             <Input
               value={templateQuery}
-              onChange={(e) => setTemplateQuery(e.target.value)}
-              placeholder={`Search ${templates.length || ''} templates…`}
+              onChange={(e) => {
+                setTemplateQuery(e.target.value);
+                setTemplatePage(1);
+              }}
+              placeholder="Search templates…"
+              aria-label="Search app templates"
               className={cn(FIELD_CONTROL_CLASS, 'h-8 w-full max-w-60 sm:w-60')}
             />
           </div>
@@ -735,7 +787,10 @@ export function WizardsView() {
                 <button
                   key={tag}
                   type="button"
-                  onClick={() => setActiveTag(activeTag === tag ? null : tag)}
+                  onClick={() => {
+                    setActiveTag(activeTag === tag ? null : tag);
+                    setTemplatePage(1);
+                  }}
                   className={cn(
                     'rounded-full border px-2.5 py-1 text-[11px] font-medium transition-colors',
                     activeTag === tag
@@ -749,72 +804,172 @@ export function WizardsView() {
             </div>
           )}
 
-          {templates.length === 0 ? (
-            <p className="py-10 text-center text-xs text-muted-foreground">
-              Loading the template catalog…
-            </p>
-          ) : filteredTemplates.length === 0 ? (
+          {templatesError ? (
+            <div className="surface-panel flex items-center justify-between gap-4 p-4">
+              <div>
+                <p className="text-xs font-medium text-ink">
+                  The template catalog could not be loaded.
+                </p>
+                <p className="mt-0.5 text-[11px] text-muted-foreground">
+                  {templatesError}
+                </p>
+              </div>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setTemplateRefresh((value) => value + 1)}
+              >
+                Try again
+              </Button>
+            </div>
+          ) : templatesLoading && templates.length === 0 ? (
+            <div
+              className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3"
+              aria-label="Loading template catalog"
+            >
+              {Array.from({ length: 6 }, (_, index) => (
+                <div
+                  key={index}
+                  className="surface-panel min-h-[8.5rem] animate-pulse p-4"
+                >
+                  <div className="mb-3 flex items-center gap-3">
+                    <span className="size-10 rounded-[10px] bg-secondary" />
+                    <div className="flex-1 space-y-2">
+                      <span className="block h-3 w-2/3 rounded bg-secondary" />
+                      <span className="block h-2.5 w-1/3 rounded bg-secondary" />
+                    </div>
+                  </div>
+                  <span className="block h-2.5 w-full rounded bg-secondary" />
+                  <span className="mt-2 block h-2.5 w-4/5 rounded bg-secondary" />
+                </div>
+              ))}
+            </div>
+          ) : templates.length === 0 ? (
             <p className="py-10 text-center text-xs text-muted-foreground">
               No templates match your search.
             </p>
           ) : (
-            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-              {filteredTemplates.map((t) => {
-                const pseudoId = `${TEMPLATE_PLAYBOOK_PREFIX}${t.id}`;
-                const cardStatus: ChatSessionStatus | undefined =
-                  running && activeRun?.playbook.id === pseudoId
-                    ? 'running'
-                    : latestRunByPlaybook.get(pseudoId)?.status;
-                return (
-                  <button
-                    key={t.id}
-                    onClick={() => choose(templateAsPlaybook(t), t)}
-                    className="surface-panel gallery-card group flex min-h-[8.5rem] flex-col p-4 text-left transition-[transform,border-color] hover:-translate-y-px hover:border-skill/35"
-                  >
-                    <div className="mb-3 flex items-center gap-3">
-                      <span className="flex size-9 shrink-0 items-center justify-center overflow-hidden rounded-xl border border-border bg-secondary/60 p-1">
-                        <TemplateLogo template={t} className="size-full" />
-                      </span>
-                      <div className="min-w-0 flex-1">
-                        <h3 className="truncate text-[13px] font-semibold tracking-[-0.015em] text-ink">
-                          {t.name}
-                        </h3>
-                        <p className="truncate font-mono text-[10px] text-muted-foreground/70">
-                          v{t.version.replace(/^v/i, '')}
-                        </p>
-                      </div>
-                      <PlayIcon className="size-3.5 shrink-0 text-muted-foreground/0 transition-colors group-hover:text-muted-foreground" />
-                    </div>
-                    <p
-                      className="line-clamp-2 text-xs leading-relaxed text-muted-foreground"
-                      title={t.description}
+            <>
+              <div
+                className={cn(
+                  'grid gap-3 transition-opacity sm:grid-cols-2 lg:grid-cols-3',
+                  templatesLoading && 'pointer-events-none opacity-55',
+                )}
+                aria-busy={templatesLoading}
+              >
+                {templates.map((t) => {
+                  const pseudoId = `${TEMPLATE_PLAYBOOK_PREFIX}${t.id}`;
+                  const cardStatus: ChatSessionStatus | undefined =
+                    running && activeRun?.playbook.id === pseudoId
+                      ? 'running'
+                      : latestRunByPlaybook.get(pseudoId)?.status;
+                  return (
+                    <button
+                      key={t.id}
+                      onClick={() => choose(templateAsPlaybook(t), t)}
+                      className="surface-panel gallery-card group flex min-h-[8.5rem] flex-col p-4 text-left transition-[transform,border-color] hover:-translate-y-px hover:border-skill/35"
                     >
-                      {t.description}
-                    </p>
-                    <div className="mt-auto flex items-center gap-1.5 pt-2.5">
-                      {t.tags.slice(0, 3).map((tag) => (
-                        <span
-                          key={tag}
-                          className="max-w-24 truncate rounded-full border border-border/60 bg-secondary px-2 py-0.5 text-[10px] text-muted-foreground"
-                        >
-                          {tag}
-                        </span>
-                      ))}
-                      {t.tags.length > 3 && (
-                        <span className="text-[10px] text-muted-foreground/60">
-                          +{t.tags.length - 3}
-                        </span>
-                      )}
-                      {cardStatus && (
-                        <span className="ml-auto shrink-0">
-                          <SessionStatusChip status={cardStatus} />
-                        </span>
-                      )}
-                    </div>
-                  </button>
-                );
-              })}
-            </div>
+                      <div className="mb-3 flex items-center gap-3">
+                        <TemplateLogo template={t} className="size-10" />
+                        <div className="min-w-0 flex-1">
+                          <h3 className="truncate text-[13px] font-semibold tracking-[-0.015em] text-ink">
+                            {t.name}
+                          </h3>
+                          <p className="truncate font-mono text-[10px] text-muted-foreground/70">
+                            v{t.version.replace(/^v/i, '')}
+                          </p>
+                        </div>
+                        <PlayIcon className="size-3.5 shrink-0 text-muted-foreground/0 transition-colors group-hover:text-muted-foreground" />
+                      </div>
+                      <p
+                        className="line-clamp-2 text-xs leading-relaxed text-muted-foreground"
+                        title={t.description}
+                      >
+                        {t.description}
+                      </p>
+                      <div className="mt-auto flex items-center gap-1.5 pt-2.5">
+                        {t.tags.slice(0, 3).map((tag) => (
+                          <span
+                            key={tag}
+                            className="max-w-24 truncate rounded-full border border-border/60 bg-secondary px-2 py-0.5 text-[10px] text-muted-foreground"
+                          >
+                            {tag}
+                          </span>
+                        ))}
+                        {t.tags.length > 3 && (
+                          <span className="text-[10px] text-muted-foreground/60">
+                            +{t.tags.length - 3}
+                          </span>
+                        )}
+                        {cardStatus && (
+                          <span className="ml-auto shrink-0">
+                            <SessionStatusChip status={cardStatus} />
+                          </span>
+                        )}
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+
+              <nav
+                className="mt-5 flex flex-wrap items-center justify-between gap-3 border-t border-border/60 pt-4"
+                aria-label="Template catalog pages"
+              >
+                <p className="text-[11px] tabular-nums text-muted-foreground">
+                  Showing {(templatePage - 1) * TEMPLATE_PAGE_SIZE + 1}-
+                  {Math.min(templatePage * TEMPLATE_PAGE_SIZE, templateTotal)} of{' '}
+                  {templateTotal}
+                </p>
+                <div className="flex items-center gap-1">
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon-sm"
+                    disabled={templatePage <= 1 || templatesLoading}
+                    onClick={() => setTemplatePage((page) => page - 1)}
+                    aria-label="Previous template page"
+                  >
+                    <ArrowLeftIcon className="size-3.5" />
+                  </Button>
+                  {paginationPages(templatePage, templateTotalPages).map((item) =>
+                    typeof item === 'number' ? (
+                      <Button
+                        key={item}
+                        type="button"
+                        variant={item === templatePage ? 'secondary' : 'ghost'}
+                        size="icon-sm"
+                        disabled={templatesLoading}
+                        onClick={() => setTemplatePage(item)}
+                        aria-label={`Template page ${item}`}
+                        aria-current={item === templatePage ? 'page' : undefined}
+                        className="tabular-nums"
+                      >
+                        {item}
+                      </Button>
+                    ) : (
+                      <span
+                        key={item}
+                        className="flex size-7 items-center justify-center text-[11px] text-muted-foreground/60"
+                        aria-hidden="true"
+                      >
+                        …
+                      </span>
+                    ),
+                  )}
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon-sm"
+                    disabled={templatePage >= templateTotalPages || templatesLoading}
+                    onClick={() => setTemplatePage((page) => page + 1)}
+                    aria-label="Next template page"
+                  >
+                    <ChevronRightIcon className="size-3.5" />
+                  </Button>
+                </div>
+              </nav>
+            </>
           )}
         </div>
       </div>
@@ -837,7 +992,11 @@ export function WizardsView() {
           <ArrowLeftIcon className="size-4" />
         </Button>
         {selectedTemplate ? (
-          <TemplateLogo template={selectedTemplate} className="size-6 shrink-0" />
+          <TemplateLogo
+            key={selectedTemplate.id}
+            template={selectedTemplate}
+            className="size-7"
+          />
         ) : (
           <span className="skill-chip flex size-6 shrink-0 items-center justify-center rounded-full">
             <SidebarGlyph icon={playbookGlyph(selected.id)} variant="chrome" />

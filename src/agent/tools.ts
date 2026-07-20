@@ -43,9 +43,19 @@ export function nextToolCallId(prefix: string): string {
   return `${prefix}_${Date.now()}_${toolCallCounter++}`;
 }
 
+/** The slice of ConnectionManager the tools actually use. main/ipc.ts can pass
+ *  the real manager, or a router that sends the "This Mac" target to the local
+ *  runtime (local-runtime.ts) and everything else over SSH. */
+export type AgentRuntime = Pick<
+  ConnectionManager,
+  'exec' | 'sftpWriteFile' | 'sftpReadFile'
+>;
+
 export type AgentToolContext = {
-  cm: ConnectionManager;
+  cm: AgentRuntime;
   approvalMode: boolean;
+  /** Task-list planning (settings.aiPlanning). false removes updateTodos. */
+  planning?: boolean;
   /**
    * The run's cancellation signal. Threaded into every remote exec so that
    * hitting Stop closes the in-flight command's SSH channel instead of leaving
@@ -118,7 +128,7 @@ export function buildTools(ctx: AgentToolContext) {
       );
     }
   };
-  return {
+  const tools = {
     listServers: tool({
       description:
         'List all configured servers with their id, name, host, user, and current connection status. Call this first if you are unsure which serverId to target.',
@@ -674,6 +684,13 @@ export function buildTools(ctx: AgentToolContext) {
       },
     }),
   };
+  // Planning off: the checklist tool doesn't exist at all — its schema and
+  // description never enter the request, and the model can't call it.
+  if (ctx.planning === false) {
+    const { updateTodos: _omitted, ...withoutTodos } = tools;
+    return withoutTodos as typeof tools;
+  }
+  return tools;
 }
 
 export type AgentTools = ReturnType<typeof buildTools>;

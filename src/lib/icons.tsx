@@ -16,6 +16,10 @@ import {
   IconCopy,
   IconCpu,
   IconDatabase,
+  IconTable,
+  IconSearch,
+  IconChevronDown,
+  IconArrowDown,
   IconDeviceLaptop,
   IconDeviceSdCard,
   IconDots,
@@ -31,6 +35,7 @@ import {
   IconRefresh,
   IconMoon,
   IconPaperclip,
+  IconPackage,
   IconPencil,
   IconFileText,
   IconPin,
@@ -101,6 +106,10 @@ export const ComposerSendArrowIcon = centralIconWrapper("arrow-up");
 export const CopyIcon = adaptIcon(IconCopy);
 export const CpuIcon = adaptIcon(IconCpu);
 export const DatabaseIcon = adaptIcon(IconDatabase);
+export const TableIcon = adaptIcon(IconTable);
+export const SearchIcon = adaptIcon(IconSearch);
+export const ChevronDownIcon = adaptIcon(IconChevronDown);
+export const ArrowDownIcon = adaptIcon(IconArrowDown);
 export const DeviceLaptopIcon = adaptIcon(IconDeviceLaptop);
 export const EllipsisIcon = adaptIcon(IconDots);
 export const ExternalLinkIcon = adaptIcon(IconExternalLink);
@@ -112,6 +121,7 @@ export const MemoryIcon = adaptIcon(IconActivity);
 export const NetworkIcon = adaptIcon(IconDeviceSdCard);
 export const MoonIcon = adaptIcon(IconMoon);
 export const PaperclipIcon = adaptIcon(IconPaperclip);
+export const PackageIcon = adaptIcon(IconPackage);
 export const PencilIcon = adaptIcon(IconPencil);
 export const FileTextIcon = adaptIcon(IconFileText);
 export const FolderIcon = adaptIcon(IconFolder);

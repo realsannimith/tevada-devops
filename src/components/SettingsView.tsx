@@ -68,7 +68,7 @@ const SECTION_GROUPS: { label: string; items: SectionItem[] }[] = [
         label: 'Agent',
         description: 'How much the agent may do on its own, and for how long.',
         icon: BotIcon,
-        settingsKeys: ['approvalMode', 'agentMaxSteps'],
+        settingsKeys: ['approvalMode', 'agentMaxSteps', 'aiPlanning', 'agentLocalEnabled'],
       },
       {
         id: 'updates',
@@ -275,6 +275,30 @@ export function SettingsView() {
                           patch({ agentMaxSteps: Number(e.target.value) || 1 })
                         }
                         aria-label="Max agent steps per run"
+                      />
+                    }
+                  />
+                </SettingsSection>
+                <SettingsSection title="Behavior">
+                  <SettingsRow
+                    title="Task-list planning"
+                    description="For multi-step jobs the agent lays out a checklist and updates it as it works. Turning this off removes the plan entirely and saves tokens on every run."
+                    control={
+                      <Switch
+                        checked={settings.aiPlanning}
+                        onCheckedChange={(v) => patch({ aiPlanning: v })}
+                        aria-label="Task-list planning"
+                      />
+                    }
+                  />
+                  <SettingsRow
+                    title="Allow running on this Mac"
+                    description="Adds “This Mac” as an agent target: commands run locally on this computer instead of over SSH. The same safety guard and approval rules apply. Off by default."
+                    control={
+                      <Switch
+                        checked={settings.agentLocalEnabled}
+                        onCheckedChange={(v) => patch({ agentLocalEnabled: v })}
+                        aria-label="Allow the agent to run on this Mac"
                       />
                     }
                   />

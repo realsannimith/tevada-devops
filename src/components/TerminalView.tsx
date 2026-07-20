@@ -9,7 +9,15 @@ import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebglAddon } from '@xterm/addon-webgl';
 import '@xterm/xterm/css/xterm.css';
+import { Button } from '@/components/ui/button';
 import { useServers } from '@/hooks/useServers';
+import {
+  AlertTriangleIcon,
+  Loader2Icon,
+  TerminalIcon,
+  WifiIcon,
+} from '@/lib/icons';
+import { cn } from '@/lib/utils';
 import { TypeaheadController } from './typeahead';
 
 type Cached = {
@@ -73,14 +81,14 @@ function getOrCreate(serverId: string): Cached {
   term.loadAddon(fit);
   term.open(el);
 
-  // GPU-accelerated rendering — the single biggest responsiveness win. Falls
+  // GPU-accelerated rendering is the single biggest responsiveness win. Falls
   // back to the default renderer automatically if the WebGL context is lost.
   try {
     const webgl = new WebglAddon();
     webgl.onContextLoss(() => webgl.dispose());
     term.loadAddon(webgl);
   } catch {
-    /* WebGL unavailable — the default renderer still works. */
+    /* WebGL unavailable; the default renderer still works. */
   }
 
   const typeahead = new TypeaheadController(term, el, THEME.background);
@@ -153,8 +161,9 @@ async function ensureSession(serverId: string, entry: Cached) {
 }
 
 export function TerminalView({ serverId }: { serverId: string }) {
-  const { statusOf } = useServers();
+  const { statusOf, errorOf, connect } = useServers();
   const status = statusOf(serverId);
+  const error = errorOf(serverId);
   const hostRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -213,11 +222,58 @@ export function TerminalView({ serverId }: { serverId: string }) {
   }, [serverId, status]);
 
   if (status !== 'connected') {
+    const connecting = status === 'connecting';
+    const failed = status === 'error';
     return (
-      <div className="flex h-full items-center justify-center text-xs text-muted-foreground">
-        {status === 'connecting'
-          ? 'Connecting…'
-          : 'Not connected. Connect this server to open a terminal.'}
+      <div className="flex h-full items-center justify-center bg-background px-6">
+        <div
+          role={failed ? 'alert' : connecting ? 'status' : undefined}
+          className="flex max-w-sm flex-col items-center text-center"
+        >
+          <div
+            className={cn(
+              'mb-3 flex size-10 items-center justify-center rounded-xl bg-secondary',
+              failed ? 'text-destructive' : 'text-muted-foreground',
+            )}
+          >
+            {connecting ? (
+              <Loader2Icon aria-hidden className="size-4 animate-spin" />
+            ) : failed ? (
+              <AlertTriangleIcon aria-hidden className="size-4" />
+            ) : (
+              <TerminalIcon aria-hidden className="size-4" />
+            )}
+          </div>
+          <h2 className="text-[13px] font-medium text-ink">
+            {connecting
+              ? 'Opening terminal'
+              : failed
+                ? 'Connection failed'
+                : 'Terminal unavailable'}
+          </h2>
+          <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
+            {connecting
+              ? 'Establishing a secure SSH session with this server.'
+              : failed
+                ? error || 'The server could not be reached with the saved credentials.'
+                : 'Connect this server to start an interactive SSH session.'}
+          </p>
+          <Button
+            type="button"
+            variant="prominent"
+            size="sm"
+            className="mt-4 rounded-full"
+            onClick={() => connect(serverId)}
+            disabled={connecting}
+          >
+            {connecting ? (
+              <Loader2Icon aria-hidden className="animate-spin" />
+            ) : (
+              <WifiIcon aria-hidden />
+            )}
+            {connecting ? 'Connecting…' : failed ? 'Retry' : 'Connect'}
+          </Button>
+        </div>
       </div>
     );
   }

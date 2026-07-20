@@ -15,20 +15,24 @@ import {
   ArtifactLogsRequest,
   ChatSession,
   IPC,
+  LOCAL_SERVER_ID,
   LogStreamRequest,
   Project,
   SteerItem,
   SaveDatabaseCredentialRequest,
+  DbEditorTarget,
   ServerAlertConfig,
   ServerProfile,
   ServerSecret,
   ServerWithStatus,
   TemplateDeployRequest,
+  TemplateListRequest,
   TemplateMeta,
 } from '../shared/ipc-types';
 import * as store from './store';
 import * as secrets from './secrets';
 import * as credentials from './credentials';
+import * as dbQuery from './db-query';
 import * as github from './github';
 import * as googleDriveSync from './googleDriveSync';
 import * as alerts from './alerts';
@@ -36,7 +40,13 @@ import { AlertEngine } from './alerts';
 import * as deployments from './deployments';
 import { startLogStream } from './logStream';
 import { TunnelManager, validateTunnelInput } from './tunnels';
-import { ConnectionManager, posixJoin } from './connection-manager';
+import { ConnectionManager, posixJoin, type ExecOptions } from './connection-manager';
+import {
+  localExec,
+  localReadFile,
+  localServerEntry,
+  localWriteFile,
+} from './local-runtime';
 import * as knownHosts from './knownHosts';
 import { Monitor } from './monitor';
 import {
@@ -72,6 +82,7 @@ import {
   buildTemplatePrompt,
   fetchTemplateFiles,
   generateHash,
+  listTemplatePage,
   listTemplates,
   processTemplate,
 } from './templates';
@@ -615,16 +626,64 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
             .map((s) => s.name),
         });
 
+    // "This Mac" target: routes the local-mac pseudo server to the local
+    // runtime (child_process + fs); everything else stays on SSH. Only exists
+    // when the user enabled it in Settings, and never inside a project scope.
+    const localAllowed = settings.agentLocalEnabled === true && !project;
+    const agentRuntime = {
+      exec: (serverId: string, command: string, opts?: ExecOptions) =>
+        serverId === LOCAL_SERVER_ID
+          ? localAllowed
+            ? localExec(command, opts)
+            : Promise.reject(
+                new Error('Running on this Mac is disabled in Settings.'),
+              )
+          : cm.exec(serverId, command, opts),
+      sftpWriteFile: (serverId: string, filePath: string, content: string) =>
+        serverId === LOCAL_SERVER_ID
+          ? localAllowed
+            ? localWriteFile(filePath, content)
+            : Promise.reject(
+                new Error('Running on this Mac is disabled in Settings.'),
+              )
+          : cm.sftpWriteFile(serverId, filePath, content),
+      sftpReadFile: (serverId: string, filePath: string, maxBytes?: number) =>
+        serverId === LOCAL_SERVER_ID
+          ? localAllowed
+            ? localReadFile(filePath, maxBytes)
+            : Promise.reject(
+                new Error('Running on this Mac is disabled in Settings.'),
+              )
+          : cm.sftpReadFile(serverId, filePath, maxBytes),
+    };
+    const localRow: ServerWithStatus | null = localAllowed
+      ? {
+          id: LOCAL_SERVER_ID,
+          port: 0,
+          authType: 'password',
+          createdAt: 0,
+          ...localServerEntry(),
+        }
+      : null;
+    const localTargetContext = localAllowed
+      ? '\n\nA special target "This Mac" (serverId "local-mac") is available: it is the user\'s OWN computer (macOS), and commands on it run locally, not over SSH. When targeting it: use macOS tooling (brew, launchctl, ~/Library paths — not apt/systemctl), NEVER use sudo (there is no interactive password prompt; if root is truly required, give the user that one command to run themselves), and be conservative — this is the user\'s personal machine, not a disposable server. Only touch it when the user explicitly asks for their Mac/local machine.'
+      : '';
+
     const toolContext: AgentToolContext = {
-      cm,
+      cm: agentRuntime,
       approvalMode: settings.approvalMode,
       allowedServerIds,
-      listServers: () =>
-        store
+      listServers: () => [
+        ...store
           .listServers()
           .filter((s) => !allowedServerIds || allowedServerIds.has(s.id))
           .map(withStatus),
-      connect: connectServer,
+        ...(localRow ? [localRow] : []),
+      ],
+      connect: (serverId) =>
+        serverId === LOCAL_SERVER_ID && localAllowed
+          ? Promise.resolve({ ok: true })
+          : connectServer(serverId),
       getStats: (serverId) => monitor.getLatest(serverId),
       emit,
       requestApproval: (serverId, command, reason) =>
@@ -824,7 +883,8 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
         toolContext,
         emit,
         todos: arg.todos,
-        projectContext,
+        planning: settings.aiPlanning !== false,
+        projectContext: projectContext + localTargetContext,
       });
     }, 0);
     return { runId };
@@ -979,7 +1039,9 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
 
   // --- app templates (open-source app gallery) ------------------------------
 
-  ipcMain.handle(IPC.templatesList, () => listTemplates());
+  ipcMain.handle(IPC.templatesList, (_event, request?: TemplateListRequest) =>
+    listTemplatePage(request),
+  );
   ipcMain.handle(IPC.templatesDeploy, (_e, arg: TemplateDeployRequest) =>
     templateDeploys.start(arg),
   );
@@ -1131,6 +1193,61 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
         arg.containerName,
         arg.engine,
       )) ?? null,
+  );
+
+  // --- database editor -------------------------------------------------------
+  // The lightweight in-app DB IDE. Each call reveals the saved credential and
+  // runs the database's own CLI (psql/mysql) over SSH — see main/db-query.ts.
+
+  ipcMain.handle(IPC.dbTables, (_e, arg: { target: DbEditorTarget }) =>
+    dbQuery.listTables(cm, arg.target),
+  );
+  ipcMain.handle(
+    IPC.dbColumns,
+    (_e, arg: { target: DbEditorTarget; schema: string; table: string }) =>
+      dbQuery.tableColumns(cm, arg.target, arg.schema, arg.table),
+  );
+  ipcMain.handle(
+    IPC.dbSelect,
+    (
+      _e,
+      arg: {
+        target: DbEditorTarget;
+        schema: string;
+        table: string;
+        limit?: number;
+        offset?: number;
+        orderBy?: { column: string; dir: 'asc' | 'desc' };
+      },
+    ) =>
+      dbQuery.selectRows(cm, arg.target, arg.schema, arg.table, {
+        limit: arg.limit,
+        offset: arg.offset,
+        orderBy: arg.orderBy,
+      }),
+  );
+  ipcMain.handle(
+    IPC.dbQuery,
+    (_e, arg: { target: DbEditorTarget; sql: string }) =>
+      dbQuery.runQuery(cm, arg.target, arg.sql),
+  );
+  ipcMain.handle(IPC.dbGraph, (_e, arg: { target: DbEditorTarget }) =>
+    dbQuery.schemaGraph(cm, arg.target),
+  );
+  ipcMain.handle(
+    IPC.dbUpdateCell,
+    (
+      _e,
+      arg: {
+        target: DbEditorTarget;
+        schema: string;
+        table: string;
+        pk: { column: string; value: string | null }[];
+        column: string;
+        value: string | null;
+      },
+    ) =>
+      dbQuery.updateCell(cm, arg.target, arg.schema, arg.table, arg.pk, arg.column, arg.value),
   );
 
   // --- github ----------------------------------------------------------------

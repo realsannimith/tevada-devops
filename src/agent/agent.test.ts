@@ -1,7 +1,73 @@
 import { describe, expect, it } from 'vitest';
-import { buildProviderOptions, buildTodoReminder, createModel } from './agent';
+import {
+  buildProviderOptions,
+  buildSystemPrompt,
+  buildTodoReminder,
+  createModel,
+  pruneToolResults,
+} from './agent';
+import type { ModelMessage } from 'ai';
 import { PROVIDER_IDS, DEFAULT_MODEL } from '@/shared/providers';
 import type { TodoItem } from '@/shared/ipc-types';
+
+describe('buildSystemPrompt', () => {
+  it('includes the planning section when planning is on', () => {
+    expect(buildSystemPrompt(true)).toContain('Planning & task list');
+    expect(buildSystemPrompt(true)).toContain('updateTodos');
+  });
+
+  it('omits every planning mention when planning is off', () => {
+    const prompt = buildSystemPrompt(false);
+    expect(prompt).not.toContain('Planning & task list');
+    expect(prompt).not.toContain('updateTodos');
+    // The rest of the prompt is intact.
+    expect(prompt).toContain('Command discipline');
+    expect(prompt).toContain('Verification & reporting');
+  });
+});
+
+describe('pruneToolResults', () => {
+  const toolMsg = (id: string, value: string): ModelMessage => ({
+    role: 'tool',
+    content: [
+      {
+        type: 'tool-result',
+        toolCallId: id,
+        toolName: 'runCommand',
+        output: { type: 'json', value: { stdout: value } },
+      },
+    ],
+  });
+
+  it('compacts only old, large tool results and keeps recent ones intact', () => {
+    const big = 'x'.repeat(5000);
+    const messages: ModelMessage[] = [
+      { role: 'user', content: 'hi' },
+      toolMsg('old', big),
+      toolMsg('recent', big),
+    ];
+    const pruned = pruneToolResults(messages, 1, 600);
+    const oldOut = (pruned[1].content as { output: { type: string; value: unknown } }[])[0].output;
+    const recentOut = (pruned[2].content as { output: { type: string; value: unknown } }[])[0].output;
+    expect(oldOut.type).toBe('text');
+    expect(String(oldOut.value)).toContain('older tool output trimmed');
+    expect(String(oldOut.value).length).toBeLessThan(800);
+    expect(recentOut.type).toBe('json');
+    // Non-mutating: the original message is untouched.
+    expect((messages[1].content as { output: { type: string } }[])[0].output.type).toBe('json');
+  });
+
+  it('leaves small outputs and non-tool messages alone', () => {
+    const messages: ModelMessage[] = [
+      { role: 'assistant', content: 'ok' },
+      toolMsg('a', 'small'),
+      toolMsg('b', 'also small'),
+    ];
+    const pruned = pruneToolResults(messages, 1, 600);
+    expect(pruned[1]).toEqual(messages[1]);
+    expect(pruned[0]).toBe(messages[0]);
+  });
+});
 
 describe('buildTodoReminder', () => {
   it('is empty when there are no todos (fresh conversation)', () => {
